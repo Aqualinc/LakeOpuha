@@ -9,7 +9,11 @@ Low flow management scenarios are prescribed according to different minimum flow
 
 Set some user variables.
 ```{r}
-LowFlowManagementType <- "PC7Proposed2030WithAMWGInflowThresholds"   #options currently are "AMWG", "PC7Proposed2025","PC7Proposed2030","ORRP", "AMWG201908_15Day","Section42a". AMWG201908_15Day15 is the same as AMWG, except assessments are made every 15 days."AMWG20190827_1Day2030" has the minimum flows and thresholds that match the AMWG submission on PC7.
+LowFlowManagementType <- "AMWG"   #options currently: "PC7Proposed2025", "PC7Proposed2030", "PC7Proposed2030WithAMWGInflowThresholds", "PC7Proposed2030variableLakeThreshold", "PC7Proposed2030withAMWGMinFlows", "PC7Proposed2030withAMWGRestrictions", "Section42a". "AMWG","AMWGwithPC7Restrictions","AMWGwithPC7MinFlows","AMWGwithMonthlyThresholds".
+#"AMWG" has the minimum flows and thresholds that match the AMWG submission on PC7.
+#Each of these options refers to a folder in the "DataDirectory". The folder must contain 6 files that describe the inflo triggers, the lake level triggers, the Minimum flow requirements, the water abstraction restrictions, the snow storage thresholds. Some also specify the timeseries of inflows, tributary flows and snow storage.
+#Each of the files have specific format requirements that, until documentation is complete, need to be discerned from the examples and the code.
+
 MinimumDamRelease     <- 1.5      #this is the number of cumecs that must be released from the dam
 MaximumCapacity       <- 65531687 #m3 This is the 100 % full capacity of Lake Opuha. Equivalent to 391.2 m level. Note that lake can actually reach to 71836459 m3 (392.2 m)
 #MaximumCapacity       <- 32765843.5 #m3 This is the 50 % full
@@ -405,9 +409,10 @@ InflowTriggerTimeSeries <- function(InflowTriggersTable= InflowTriggersData){
 #**********************************************
 Many of these must be in a directory that matches the version being tested, i.e. by the "LowFlowManagementType" variable
 ```{r}
-ProjectDirectory <- "G:\\ARL Projects\\RD Projects\\RD18004_Lake Opuha Further Work\\Potential Available Volume" #At Aqualinc
-ProjectDirectory <- "H:\\RD Projects\\RD18004_Lake Opuha Further Work\\Potential Available Volume"               #At Rainfall.NZ via connection to Aqualilnc server
-ProjectDirectory <- "D:\\Projects\\Aqualinc\\projects\\OpuhaAMWG"            #At Rainfall.NZ
+#ProjectDirectory <- "G:\\ARL Projects\\RD Projects\\RD18004_Lake Opuha Further Work\\Potential Available Volume" #At Aqualinc
+#ProjectDirectory <- "H:\\RD Projects\\RD18004_Lake Opuha Further Work\\Potential Available Volume"               #At Rainfall.NZ via connection to Aqualinc server
+#ProjectDirectory <- "D:\\Projects\\Aqualinc\\projects\\OpuhaAMWG"            #At Rainfall.NZ
+ProjectDirectory <- "D:\\Projects\\Aqualinc\\projects\\OpuhaAMWG\\R"         #At Rainfall.NZ
 DataDirectory    <- file.path(ProjectDirectory,"Data")
 
 
@@ -421,9 +426,10 @@ SnowTriggersFileName                     <- file.path(DataDirectory,LowFlowManag
 
 LakeLevelToAreaAndVolumeFile             <- file.path(DataDirectory, "LakeLevelAreaVolume.csv")
 
-InflowsTeAnaWaiRockwoodSnowFile          <- file.path(DataDirectory, "TimeSeriesData.csv")
+InflowsTeAnaWaiRockwoodSnowFile          <- file.path(DataDirectory,LowFlowManagementType, "TimeSeriesData.csv")
+if (!file.exists(InflowsTeAnaWaiRockwoodSnowFile)) InflowsTeAnaWaiRockwoodSnowFile          <- file.path(DataDirectory, "TimeSeriesData.csv")
+
 LakeStorageOperatingIntentFile           <- file.path(DataDirectory, "LakeStorageOperatingIntent.csv")
-#LakeStorageOperatingIntentFile           <- file.path(DataDirectory, "LakeStorageOperatingIntent-90pctMax.csv")
 ```
 
 
@@ -462,12 +468,9 @@ InflowsTeAnaWaiRockwoodSnowClimatology <- Climatologise(InflowsTeAnaWaiRockwoodS
 
 
 ParameterAveraging <- list(AMWG= c(LakeLevel = 7, Inflows = 30, Snow = 30),
-                           AMWG15= c(LakeLevel = 7, Inflows = 30, Snow = 30),
                            AMWGwithMonthlyThresholds=c(LakeLevel = 7, Inflows = 30, Snow = 30),
                            AMWGwithPC7MinFlows=c(LakeLevel = 7, Inflows = 30, Snow = 30),
                            AMWGwithPC7Restrictions=c(LakeLevel = 7, Inflows = 30, Snow = 30),
-                           AMWG201908_15Day=c(LakeLevel = 7, Inflows = 30, Snow = 30),
-                           AMWG20190827_1Day2030=c(LakeLevel = 7, Inflows = 30, Snow = 30),
                            PC7Proposed2025 = c(LakeLevel = 30, Inflows = 30, Snow = 30),
                            PC7Proposed2030withAMWGMinFlows = c(LakeLevel = 30, Inflows = 30, Snow = 30),
                            PC7Proposed2030withAMWGRestrictions = c(LakeLevel = 30, Inflows = 30, Snow = 30),
@@ -829,7 +832,7 @@ for (DateNumber in index(LimitedPeriod)) {#
       } #end of Section42a regime check
     }else 
       #AMWG also requires 2 thresholds to be crossed, but re-assessment happens in 14 days (set by the AMWGReassessmentDelay variable)
-      if (LowFlowManagementType %in% c("AMWG","AMWG201908_15Day","AMWGwithMonthlyThresholds","AMWGwithOC7MinFlows","AMWGwithPC7Restrictions","AMWG20190827_1Day2030")) {
+      if (LowFlowManagementType %in% c("AMWG","AMWGwithMonthlyThresholds","AMWGwithPC7MinFlows","AMWGwithPC7Restrictions")) {
 
       if (DaysSinceLevelInitiated < AMWGReassessmentDelay) {
         CurrentLowFlowManagementLevel <- PreviousLowFlowManagementLevel
