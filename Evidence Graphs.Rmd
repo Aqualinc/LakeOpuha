@@ -1,0 +1,392 @@
+---
+title: "R Notebook to generate plots used in Opuha Water Ltd. Plan Change 7 evidence."
+output: html_notebook
+---
+
+
+
+Plot of the inflow data for May and the generalised extreme value distribution
+```{r}
+#Load required libraries
+if (!require(scales)) install.packages('scales'); library(scales)     #needed to provide the "ordinal" function, used in the graph title.
+
+source("GeneralisedExtremeValueDistributions.R") #This has a function which creates a list of the 30 day averaged input data, and the GEV parameters of averaged input data
+
+InflowData <- "H:\\RD Projects\\RD18004_Lake Opuha Further Work\\Potential Available Volume\\LevelInflowSnow1998-2017.csv"
+
+AllGEVAndAveragedObs <- GEVParameterGenerator(InflowData)
+
+DateOfInterest <- as.Date("2019-05-31","%Y-%m-%d")
+
+InflowGEVParameters <- AllGEVAndAveragedObs[["GEVParameters"]][["Inflows"]][[as.numeric(format(DateOfInterest,"%j"))]]
+ThresholdPercentiles <- seq(0,1, by = 1/19)
+InflowGEV <- qgevd(ThresholdPercentiles,InflowGEVParameters$parameters['location'], InflowGEVParameters$parameters['scale'],InflowGEVParameters$parameters['shape'])
+
+GEVNonExceedanceReturnPeriod <- 1/ThresholdPercentiles
+
+Obs <- AllGEVAndAveragedObs[["AveragedObs"]][["Inflows"]][[as.numeric(format(DateOfInterest,"%j"))]]
+
+#Order the obs
+Obs <- Obs[order(Obs)]
+
+#The smallest value is taken as ocurring 1 in 19 years, so has a Non-exceedance return period of 19. Tne next is half that, next a third etc.
+NonExceedanceReturnPeriodObs <- length(Obs)/index(Obs)
+
+#Plot it. Note the need to multiply by 1000 to get into litres per second
+{
+plot(y=InflowGEV*1000,x=GEVNonExceedanceReturnPeriod,log="x",type="l", col = "blue", 
+     main = paste("30 day average before",ordinal(as.numeric(format(DateOfInterest,"%d"))),format(DateOfInterest," of %B")), 
+     ylab = "Average lake inflow [litres per second]",
+     xlab = "Non-exceedance return period [years]")
+points(y=Obs*1000,x=NonExceedanceReturnPeriodObs, pch = 1)
+
+grid()
+legend("topright",legend=c("data","fit"),col=c("black","blue"),lty=c(NA,1),pch=c(1,NA))
+}
+```
+
+
+I now need a graph of the operating intent together with the varying lake levels
+```{r}
+if (!require(readxl)) install.packages('readxl'); library(readxl)   #Needed to read excel data
+if (!require(zoo)) install.packages('zoo'); library(zoo)    #needed for time series data processing
+if (!require(MALDIquant)) install.packages('MALDIquant'); library(MALDIquant)    #needed for time series data processing
+
+#Load section 42a variable lake level data
+Section42aLakeLevelThresholdsFile <- "..\\Data\\Section42a\\LevelTriggers.csv" 
+Section42aLakeLevelThresholdsFile <-  "..\\Data\\PC7Proposed2030variableLakeThreshold\\LevelTriggers.csv"
+Section42aLakeLevelThresholds <- read.table(Section42aLakeLevelThresholdsFile,sep=",",header = TRUE)
+
+#Convert to a daily zoo from 1st April 2019 to 31st March 2020
+DatesOfInterest <- seq.Date(from = as.Date("2019-04-01"),to= as.Date("2020-03-31"), by="day")
+Section42aLakeLevelThresholds$Dates <- DatesOfInterest[match(Section42aLakeLevelThresholds$Julian.Day,as.numeric(format(DatesOfInterest,"%j")))]
+Section42aLakeLevelThresholdsZoo <- zoo(Section42aLakeLevelThresholds[,c("Level1","Level2")], order.by = Section42aLakeLevelThresholds$Dates)
+
+#Load operating intent data
+#OperatingIntentData <- "H:\\RD Projects\\RD18004_Lake Opuha Further Work\\Potential Available Volume\\Lake Level threshold calculatorV2.xlsx"
+OperatingIntentData <- "..\\Data\\Lake Level threshold calculatorV2.xlsx"
+OperatingIntentByMonth <- read_excel(OperatingIntentData, sheet = "Operating Intent", range="C3:I15")
+
+OperatingIntentByMonth$Date <- as.Date(paste0("01-",OperatingIntentByMonth[[1]]),"%d-%b")
+#Turn into a zoo, with each month representing the 1st day of the month
+OperatingIntentZoo <- zoo(OperatingIntentByMonth[,c("Low","Nominal","High")],order.by = OperatingIntentByMonth[["Date"]])
+
+OperatingIntentYear2 <- OperatingIntentZoo
+index(OperatingIntentYear2) <- index(OperatingIntentYear2) - 365
+TwoYearOperatingIntent <- c(OperatingIntentZoo,OperatingIntentYear2)
+
+#Linear interpolate to each day of the year
+DaySequence <- zoo(, seq(from=as.Date("2019-01-01"),to=as.Date("2020-12-31"),by="day"))
+DailyOperatingIntent <- merge(TwoYearOperatingIntent,DaySequence)
+DailyOperatingIntent <- na.approx(DailyOperatingIntent)
+
+#Extend back in time to 1999
+FullDateSequence <- seq(from=as.Date("1999-01-01"),to=as.Date("2021-01-01"),by="day")
+FullOperatingExtent <- coredata(DailyOperatingIntent)[match(format(FullDateSequence,"%j"),format(index(DailyOperatingIntent),"%j")),]
+FulloperatingExtentZoo <- zoo(FullOperatingExtent, order.by = FullDateSequence)
+FulloperatingExtentZoo <- na.approx(FulloperatingExtentZoo)
+
+
+
+#Get lake levels
+LakeLevelLUT <- read_excel(OperatingIntentData, sheet = "Percentiles", range="N1:O2251")
+
+FulloperatingExtentZoo$LowLevel <- LakeLevelLUT$Upper[match.closest(FulloperatingExtentZoo$Low, LakeLevelLUT$`Lake Capacity %`)]
+FulloperatingExtentZoo$HighLevel <- LakeLevelLUT$Upper[match.closest(FulloperatingExtentZoo$High, LakeLevelLUT$`Lake Capacity %`)]
+
+Level2Thresholds <- FulloperatingExtentZoo$Low - 0.15
+Level1Thresholds <- FulloperatingExtentZoo$Low - 0.10
+Thresholds <- zoo(data.frame(Level1Percent = Level1Thresholds,Level2Percent = Level2Thresholds), order.by = index(FulloperatingExtentZoo))
+Thresholds$Lvel1LakelLevel <- LakeLevelLUT$Upper[match.closest(Thresholds$Level1Percent, LakeLevelLUT$`Lake Capacity %`)]
+Thresholds$Lvel2LakelLevel <- LakeLevelLUT$Upper[match.closest(Thresholds$Level2Percent, LakeLevelLUT$`Lake Capacity %`)]
+
+Thresholds$Section42aLvel1LakeLevel <- Section42aLakeLevelThresholds$Level1[match(as.numeric(format(index(Thresholds),"%j")),Section42aLakeLevelThresholds$Julian.Day)]
+Thresholds$Section42aLvel2LakeLevel <- Section42aLakeLevelThresholds$Level2[match(as.numeric(format(index(Thresholds),"%j")),Section42aLakeLevelThresholds$Julian.Day)]
+
+{
+  par(mar=c(5,4,6,2))
+  plot(NULL, ylab = "Lake depth (m above sea level)", xaxt="n",xlab="",ylim = range(LakeLevelLUT$Upper),xlim = c(as.Date("2019-04-01"),as.Date("2020-04-01")))
+  axis.Date(1, at=seq(from=as.Date("2019-04-01"),to=as.Date("2020-04-01"),by="month"),format = "%d -%b", las=2)
+    polygon(y=c(coredata(FulloperatingExtentZoo$LowLevel), rev(coredata(FulloperatingExtentZoo$HighLevel))),x=as.numeric(c(index(FulloperatingExtentZoo),rev(index(FulloperatingExtentZoo)))),col="light grey",border=NA)
+  lines(Thresholds$Lvel1LakelLevel, col = "orange")
+  lines(Thresholds$Lvel2LakelLevel, col = "red")
+  abline(h=385,col="orange",lty=3)
+  abline(h=380,col="red",lty=3)
+  #lines(Section42aLakeLevelThresholdsZoo$Level1, col = "orange", lty=5)
+  #lines(Section42aLakeLevelThresholdsZoo$Level2, col = "red", lty=5)
+  legend("bottom",legend=c("Operating Intent range","AMWG Level 1","AMWG Level 2","PC7 Level 1","PC7 Level 2"),
+         inset=c(0,1),
+         xpd=TRUE,
+         ncol = 2,
+         col=c(NA,"orange","red","orange","red"),
+         lty=c(NA,1,1,3,3),
+         fill=c("light grey",NA,NA,NA,NA),
+         x.intersp=c(0.5,2,2,2,2),
+         border=c(NA,NA,NA,NA,NA),
+         bty="n")
+  # legend("bottom",legend=c("Operating Intent range","AMWG Level 1","AMWG Level 2","PC7 Level 1","PC7 Level 2","Section42a Level 1/Officer's","Section 42a Level 2"),
+  #        inset=c(0,1),
+  #        xpd=TRUE,
+  #        ncol = 2,
+  #        col=c(NA,"orange","red","orange","red","orange","red"),
+  #        lty=c(NA,1,1,3,3,5,5),
+  #        fill=c("light grey",NA,NA,NA,NA,NA,NA),
+  #        #x.intersp=c(0.5,2,2,2,2,2,2),
+  #        border=c(NA,NA,NA,NA,NA,NA,NA),
+  #        bty="n")
+
+
+}
+```
+
+Next graph is to show the difference between the lake levels under PC7 and AMWG rules
+This uses the output file from each of the runs
+```{r, fig.height = 8,fig.width=6}
+if (!require(zoo)) install.packages('zoo'); library(zoo)    #needed for time series data processing
+AMWGDiscretionDataFile <- "D:\\Projects\\Aqualinc\\projects\\OpuhaAMWG\\Data\\OutputAMWGWithDiscretion.csv"
+AMWGDiscretionData <- read.csv.zoo(AMWGDiscretionDataFile)
+
+AMWGNoDiscretionDataFile <- "D:\\Projects\\Aqualinc\\projects\\OpuhaAMWG\\Data\\OutputAMWGNoDiscretion.csv"
+AMWGNoDiscretionData <- read.csv.zoo(AMWGNoDiscretionDataFile)
+
+PC72030DataFile <- "D:\\Projects\\Aqualinc\\projects\\OpuhaAMWG\\Data\\PC71999-2017Output.csv"
+PC72030Data <- read.csv.zoo(PC72030DataFile)
+
+PC72025DataFile <- "D:\\Projects\\Aqualinc\\projects\\OpuhaAMWG\\Data\\PC72025_1999-2017Output.csv"
+#PC72025DataFile <- "D:\\Projects\\Aqualinc\\projects\\OpuhaAMWG\\Data\\Output.csv"
+PC72025Data <- read.csv.zoo(PC72025DataFile)
+
+OfficersDataFile <- "D:\\Projects\\Aqualinc\\projects\\OpuhaAMWG\\Data\\OutputSection42aOfficer1999_2017.csv"
+OfficersData <- read.csv.zoo(OfficersDataFile)
+
+{
+layout(matrix(1:4, ncol = 1), widths = 1, heights = lcm(c(5.684,4.16,4.16,6.192)))
+
+
+{
+  par(mai=c(0.2, 0.8,0.6,0))
+  plot(NULL,ylab = "Lake depth (m above sea level)", ylim = range(LakeLevelLUT$Upper),xaxt = "n",xlab="",xlim=c(as.Date("2014-08-01"),as.Date("2016-10-01")))
+  axis.Date(1, at=seq(from=as.Date("2014-04-01"),to=as.Date("2017-04-01"),by="2 month"),labels=FALSE)
+      polygon(y=c(coredata(FulloperatingExtentZoo$LowLevel), rev(coredata(FulloperatingExtentZoo$HighLevel))),x=as.numeric(c(index(FulloperatingExtentZoo),rev(index(FulloperatingExtentZoo)))),col="light grey",border=NA)
+  lines(Thresholds$Lvel1LakelLevel, col = "orange")
+  lines(Thresholds$Lvel2LakelLevel, col = "red")
+  lines(AMWGDiscretionData$LakeLevel.m.,lwd=2)
+  abline(h=370,col="red",lwd=2,lty=2)
+    legend("bottom",inset=c(-0.1,1),ncol = 3,xpd=TRUE,legend=c("Simulated Lake Level","Operating Intent range","Level 1 threshold","Level 2 threshold","Empty Lake"),col=c("black","light grey","orange","red","red"),lty=c(1,NA,1,1,2),lwd=c(2,NA,1,1,2),pch=c(NA,15,NA,NA,NA),pt.cex=c(1,2,1,1,1),x.intersp=c(0.5,0.5,0.5,0.5,0.5),border=c(NA,NA,NA,NA,NA),bty="n",text.width = strwidth("operating Intent range     "))
+    
+    title("AMWG, Stakeholder Discretion", line = -1)
+}
+
+{
+  par(mai=c(0.2, 0.8,0,0))
+  plot(NULL,ylab = "Lake depth (m above sea level)", ylim = range(LakeLevelLUT$Upper),xaxt = "n",xlab="",xlim=c(as.Date("2014-08-01"),as.Date("2016-10-01")))
+  axis.Date(1, at=seq(from=as.Date("2014-04-01"),to=as.Date("2017-04-01"),by="2 month"),labels=FALSE)
+      polygon(y=c(coredata(FulloperatingExtentZoo$LowLevel), rev(coredata(FulloperatingExtentZoo$HighLevel))),x=as.numeric(c(index(FulloperatingExtentZoo),rev(index(FulloperatingExtentZoo)))),col="light grey",border=NA)
+  lines(Thresholds$Lvel1LakelLevel, col = "orange")
+  lines(Thresholds$Lvel2LakelLevel, col = "red")
+  lines(AMWGNoDiscretionData$LakeLevel.m.,lwd=2)
+  abline(h=370,col="red",lwd=2,lty=2)
+  #  legend("bottom",inset=c(-0.1,1),ncol = 3,xpd=TRUE,legend=c("Simulated Lake Level","Operating Intent range","Level 1 threshold","Level 2 threshold","Empty Lake"),col=c("black","light grey","orange","red","red"),lty=c(1,NA,1,1,2),lwd=c(2,NA,1,1,2),pch=c(NA,15,NA,NA,NA),pt.cex=c(1,2,1,1,1),x.intersp=c(0.5,0.5,0.5,0.5,0.5),border=c(NA,NA,NA,NA,NA),bty="n",text.width = strwidth("operating Intent range     "))
+    
+    title("AMWG, No Stakeholder discretion", line = -1)
+}
+
+  {
+    par(mai = c(0.2,0.8,0,0))
+    plot(NULL,ylab = "Lake depth (m above sea level)", ylim = range(LakeLevelLUT$Upper),xaxt = "n",xlab="",xlim=c(as.Date("2014-08-01"),as.Date("2016-10-01")))
+    axis.Date(1, at=seq(from=as.Date("2014-04-01"),to=as.Date("2017-04-01"),by="2 month"),labels=FALSE)
+    #axis.Date(1, at=seq(from=as.Date("2014-04-01"),to=as.Date("2017-04-01"),by="2 month"),format = "%b %Y", las=2)
+    polygon(y=c(coredata(FulloperatingExtentZoo$LowLevel), rev(coredata(FulloperatingExtentZoo$HighLevel))),x=as.numeric(c(index(FulloperatingExtentZoo),rev(index(FulloperatingExtentZoo)))),col="light grey",border=NA)
+    abline(h=385,col="orange",lty=2)
+    abline(h=380,col="red",lty=2)
+    #      lines(Thresholds$Section42aLvel1LakeLevel, col = "orange")
+  #lines(Thresholds$Section42aLvel2LakeLevel, col = "red")
+          
+    lines(PC72025Data$LakeLevel.m.,lwd=2)
+    abline(h=370,col="red",lwd=2,lty=2)
+    #legend("bottomright",inset=c(0,0.05),legend=c("Simulated Lake Level","Operating Intent range","Level 1 threshold","Level 2 threshold","Empty Lake"),col=c("black",NA,"orange","red","red"),lty=c(1,NA,1,1,2),lwd=c(2,NA,1,1,2),fill=c(NA,"light grey",NA,NA,NA),x.intersp=c(2,0.5,2,2,2),border=c(NA,NA,NA,NA,NA),bty="n")
+    title("PC7, 2025", line = -1)
+  }
+  {
+    par(mai = c(1,0.8,0,0))
+    plot(NULL,ylab = "Lake depth (m above sea level)", ylim = range(LakeLevelLUT$Upper),xaxt = "n",xlab="",xlim=c(as.Date("2014-08-01"),as.Date("2016-10-01")))
+    
+    axis.Date(1, at=seq(from=as.Date("2014-04-01"),to=as.Date("2017-04-01"),by="2 month"),format = "%b %Y", las=2)
+    polygon(y=c(coredata(FulloperatingExtentZoo$LowLevel), rev(coredata(FulloperatingExtentZoo$HighLevel))),x=as.numeric(c(index(FulloperatingExtentZoo),rev(index(FulloperatingExtentZoo)))),col="light grey",border=NA)
+    abline(h=385,col="orange",lty=2)
+    abline(h=380,col="red",lty=2)
+    #  lines(Thresholds$Section42aLvel1LakeLevel, col = "orange")
+  #lines(Section42aLakeLevelThresholdsZoo$Level2, col = "red")
+
+    lines(PC72030Data$LakeLevel.m.,lwd=2)
+    abline(h=370,col="red",lwd=2,lty=2)
+
+    #legend("bottomright",inset=c(0,0.05),legend=c("Simulated Lake Level","Operating Intent range","Level 1 threshold","Level 2 threshold","Empty Lake"),col=c("black",NA,"orange","red","red"),lty=c(1,NA,1,1,2),lwd=c(2,NA,1,1,2),fill=c(NA,"light grey",NA,NA,NA),x.intersp=c(2,0.5,2,2,2),border=c(NA,NA,NA,NA,NA),bty="n")
+    title("PC7, 2030", line = -1)
+  }
+
+}
+```
+
+```{r, fig.height = 8,fig.width=6}
+#Now plot the Officer Recommendations
+#dev.new(height=4.224, unit="cm",noRStudioGD = TRUE)
+layout(matrix(1:4, ncol = 1), widths = 1, heights = lcm(c(8.224,2.128,4.16,5.684)))
+  {
+    par(mai = c(1,0.8,0.6,0))
+    plot(NULL,ylab = "Lake depth (m above sea level)", ylim = range(LakeLevelLUT$Upper),xaxt = "n",xlab="",xlim=c(as.Date("2014-08-01"),as.Date("2016-10-01")))
+    
+    axis.Date(1, at=seq(from=as.Date("2014-04-01"),to=as.Date("2017-04-01"),by="2 month"),format = "%b %Y", las=2)
+    polygon(y=c(coredata(FulloperatingExtentZoo$LowLevel), rev(coredata(FulloperatingExtentZoo$HighLevel))),x=as.numeric(c(index(FulloperatingExtentZoo),rev(index(FulloperatingExtentZoo)))),col="light grey",border=NA)
+  #  abline(h=385,col="orange",lty=2)
+  #  abline(h=380,col="red",lty=2)
+  lines(Thresholds$Section42aLvel1LakeLevel, col = "orange")
+  #lines(Section42aLakeLevelThresholdsZoo$Level2, col = "red")
+
+    lines(OfficersData$LakeLevel.m.,lwd=2)
+    abline(h=370,col="red",lwd=2,lty=2)
+
+    legend("bottom",inset=c(1.5,1),ncol = 3,xpd=TRUE,legend=c("Simulated Lake Level","Operating Intent range","Level 1 threshold","Empty Lake"),col=c("black","light grey","orange","red"),lty=c(1,NA,1,2),lwd=c(2,NA,1,2),pch=c(NA,15,NA,NA),pt.cex=c(1,2,1,1),x.intersp=c(0.5,0.5,0.5,0.5),border=c(NA,NA,NA,NA),bty="n",text.width = strwidth("operating Intent range     "))
+}
+  {
+    par(mai = c(0.2,0.8,0,0))
+    plot(NULL,ylab = "Lake depth (m above sea level)", ylim = range(LakeLevelLUT$Upper),xaxt = "n",xlab="",xlim=c(as.Date("2014-08-01"),as.Date("2016-10-01")))
+
+  }
+  {
+    par(mai = c(0.2,0.8,0,0))
+    plot(NULL,ylab = "Lake depth (m above sea level)", ylim = range(LakeLevelLUT$Upper),xaxt = "n",xlab="",xlim=c(as.Date("2014-08-01"),as.Date("2016-10-01")))
+
+  }
+  {
+    par(mai = c(0.2,0.8,0,0))
+    plot(NULL,ylab = "Lake depth (m above sea level)", ylim = range(LakeLevelLUT$Upper),xaxt = "n",xlab="",xlim=c(as.Date("2014-08-01"),as.Date("2016-10-01")))
+
+  }
+```
+
+And now a graph showing the flows at Saleyards bridge
+```{r, fig.height = 8,fig.width=6}
+if (!require(zoo)) install.packages('zoo'); library(zoo)    #needed for time series data processing
+AMWGDiscretionDataFile <- "D:\\Projects\\Aqualinc\\projects\\OpuhaAMWG\\Data\\OutputAMWGWithDiscretion.csv"
+AMWGDiscretionData <- read.csv.zoo(AMWGDiscretionDataFile)
+
+AMWGNoDiscretionDataFile <- "D:\\Projects\\Aqualinc\\projects\\OpuhaAMWG\\Data\\OutputAMWGNoDiscretion.csv"
+AMWGNoDiscretionData <- read.csv.zoo(AMWGNoDiscretionDataFile)
+
+PC72030DataFile <- "D:\\Projects\\Aqualinc\\projects\\OpuhaAMWG\\Data\\PC71999-2017Output.csv"
+PC72030Data <- read.csv.zoo(PC72030DataFile)
+
+PC72025DataFile <- "D:\\Projects\\Aqualinc\\projects\\OpuhaAMWG\\Data\\PC72025_1999-2017Output.csv"
+PC72025Data <- read.csv.zoo(PC72025DataFile)
+
+{
+layout(matrix(1:4, ncol = 1), widths = 1, height = lcm(c(5.684,4.16,4.16,6.192)))
+
+
+{
+  par(mai=c(0.2, 0.8,0.6,0))
+  plot(NULL,ylab = "River flow (cumecs)", ylim = c(0,25),xaxt = "n",xlab="",xlim=c(as.Date("2014-08-01"),as.Date("2016-10-01")))
+  axis.Date(1, at=seq(from=as.Date("2014-04-01"),to=as.Date("2017-04-01"),by="2 month"),labels=FALSE)
+
+  #lines(AMWGDiscretionData$NonRestrictedMinimumFlow, col = "orange")
+  lines(AMWGDiscretionData$MinimumFlow, col = "red")
+
+  lines(AMWGDiscretionData$Estimated,lwd=2)
+  abline(h=3,col="red",lwd=2,lty=2)
+    legend("bottom",inset=c(-0.1,1),ncol = 3,xpd=TRUE,legend=c("Simulated flows","Regime min. flows","Eco. flow limit"),col=c("black","red","red"),lty=c(1,1,2),lwd=c(2,1,2),pch=c(NA,NA,NA),pt.cex=c(1,1,1),x.intersp=c(0.5,0.5,0.5),border=c(NA,NA,NA),bty="n",text.width = strwidth("operating Intent range     "))
+    
+    title("AMWG, Stakeholder Discretion", line = -1)
+}
+
+
+
+{
+  par(mai=c(0.2, 0.8,0,0))
+  plot(NULL,ylab = "River flow (cumecs)", ylim = c(0,25),xaxt = "n",xlab="",xlim=c(as.Date("2014-08-01"),as.Date("2016-10-01")))
+  
+  axis.Date(1, at=seq(from=as.Date("2014-04-01"),to=as.Date("2017-04-01"),by="2 month"),labels=FALSE)
+
+  #lines(AMWGNoDiscretionData$NonRestrictedMinimumFlow, col = "orange")
+  lines(AMWGNoDiscretionData$MinimumFlow, col = "red")
+
+  lines(AMWGNoDiscretionData$Estimated,lwd=2)
+  abline(h=3,col="red",lwd=2,lty=2)
+    title("AMWG, No Stakeholder Discretion", line = -1)
+}
+  {
+  par(mai=c(0.2, 0.8,0,0))
+  plot(NULL,ylab = "River flow (cumecs)", ylim = c(0,25),xaxt = "n",xlab="",xlim=c(as.Date("2014-08-01"),as.Date("2016-10-01")))
+  
+  axis.Date(1, at=seq(from=as.Date("2014-04-01"),to=as.Date("2017-04-01"),by="2 month"),labels=FALSE)
+
+  #lines(PC72025Data$NonRestrictedMinimumFlow, col = "orange")
+  lines(PC72025Data$MinimumFlow, col = "red")
+
+  lines(PC72025Data$Estimated,lwd=2)
+  abline(h=3,col="red",lwd=2,lty=2)
+    title("PC7 2025", line = -1)
+}
+ 
+  {
+  par(mai = c(1,0.8,0,0))
+  plot(NULL,ylab = "River flow (cumecs)", ylim = c(0,25),xaxt = "n",xlab="",xlim=c(as.Date("2014-08-01"),as.Date("2016-10-01")))
+  
+  axis.Date(1, at=seq(from=as.Date("2014-04-01"),to=as.Date("2017-04-01"),by="2 month"),format = "%b %Y", las=2)
+
+  #lines(PC72030Data$NonRestrictedMinimumFlow, col = "orange")
+  lines(PC72030Data$MinimumFlow, col = "red")
+
+  lines(PC72030Data$Estimated,lwd=2)
+  abline(h=3,col="red",lwd=2,lty=2)
+    title("PC7 2030", line = -1)
+} 
+
+}
+
+```
+```{r, fig.height = 8,fig.width=6}
+if (!require(zoo)) install.packages('zoo'); library(zoo)    #needed for time series data processing
+
+
+OfficersDataFile <- "D:\\Projects\\Aqualinc\\projects\\OpuhaAMWG\\Data\\OutputSection42aOfficer1999_2017.csv"
+OfficersData <- read.csv.zoo(OfficersDataFile)
+{
+layout(matrix(1:4, ncol = 1), widths = 1, height = lcm(c(8.224,2.128,4.16,5.684)))
+
+
+{
+  par(mai=c(1, 0.8,0.6,0))
+  plot(NULL,ylab = "River flow (cumecs)", ylim = c(0,25),xaxt = "n",xlab="",xlim=c(as.Date("2014-08-01"),as.Date("2016-10-01")))
+    axis.Date(1, at=seq(from=as.Date("2014-04-01"),to=as.Date("2017-04-01"),by="2 month"),format = "%b %Y", las=2)
+
+  #lines(AMWGDiscretionData$NonRestrictedMinimumFlow, col = "orange")
+  lines(OfficersData$MinimumFlow, col = "red")
+
+  lines(OfficersData$Estimated,lwd=2)
+  abline(h=3,col="red",lwd=2,lty=2)
+    legend("bottom",inset=c(-0.1,1),ncol = 3,xpd=TRUE,legend=c("Simulated flows","Regime min. flows","Eco. flow limit"),col=c("black","red","red"),lty=c(1,1,2),lwd=c(2,1,2),pch=c(NA,NA,NA),pt.cex=c(1,1,1),x.intersp=c(0.5,0.5,0.5),border=c(NA,NA,NA),bty="n",text.width = strwidth("operating Intent range     "))
+    
+    title("Officer Recommendation", line = -1)
+}
+
+
+
+{
+  par(mai=c(0.2, 0.8,0,0))
+  plot(NULL,ylab = "River flow (cumecs)", ylim = c(0,25),xaxt = "n",xlab="",xlim=c(as.Date("2014-08-01"),as.Date("2016-10-01")))
+}
+  {
+  par(mai=c(0.2, 0.8,0,0))
+  plot(NULL,ylab = "River flow (cumecs)", ylim = c(0,25),xaxt = "n",xlab="",xlim=c(as.Date("2014-08-01"),as.Date("2016-10-01")))
+
+}
+ 
+  {
+  par(mai = c(1,0.8,0,0))
+  plot(NULL,ylab = "River flow (cumecs)", ylim = c(0,25),xaxt = "n",xlab="",xlim=c(as.Date("2014-08-01"),as.Date("2016-10-01")))
+
+} 
+
+}
+```
