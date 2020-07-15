@@ -1,0 +1,1115 @@
+---
+title: "R script to generate scenarios of lake Opuha levels/storage and Opihi at Saleyards Bridge stream flows"
+---
+ 
+The intention of this script is to estimate time series of Lake Opuha levels/storage and the Opihi at Saleyards Bridge stream flows under different low flow management scenarios.
+Historical time series of lake inflows, snow storage, Te Ana Wai flow and Opihi at Rockwood flows are the primary input.
+Low flow management scenarios are prescribed according to different minimum flow and allocation regimes.
+
+
+Set some user variables.
+```{r}
+LowFlowManagementType <- "PC7Proposed2030WithAMWGInflowThresholds"   #options currently are "AMWG", "PC7Proposed2025","PC7Proposed2030","ORRP", "AMWG201908_15Day","Section42a". AMWG201908_15Day15 is the same as AMWG, except assessments are made every 15 days."AMWG20190827_1Day2030" has the minimum flows and thresholds that match the AMWG submission on PC7.
+MinimumDamRelease     <- 1.5      #this is the number of cumecs that must be released from the dam
+MaximumCapacity       <- 65531687 #m3 This is the 100 % full capacity of Lake Opuha. Equivalent to 391.2 m level. Note that lake can actually reach to 71836459 m3 (392.2 m)
+#MaximumCapacity       <- 32765843.5 #m3 This is the 50 % full
+#MaximumCapacity       <- 16382921.75 #m3 This is the 25 % full 
+#MaximumCapacity       <- 6553168.7 #m3 This is the 10 % full 
+SaleyardsBridgeBuffer <- 0.1      #This is the number of cumecs added to the required flows to ensure natural variation in flows does not lead to a breach of consent
+DamExists             <- TRUE     #This is used to test no-dam scenarios
+AMWGReassessmentDelay <- 15       #Minimum number of days in a restrictive regime
+
+RegimeChangeType <- "Auto" #options are "Userselect","AMWGWorkshop" and "Auto". UserSelect requies interaction with dialog boxes. AMWGWorkshop is not implemented, but is intended to use the slections from the AMWG workshop plus obvious choices otherwise, Auto means always change based on criteria.
+#Until the "AMWGWorkshop" option is implemented, it may be manually achieved by using "Userselect" and selecting the same choices as those recorded at the workshop. This is how the AWG with Discretion scenario is achieved.
+
+SelectYears <- FALSE #Option to select which years to process
+#Set flushing flow parameters. To help assess the effect of using water for flushing flows.
+#Several scenarios to trial
+# 1/ three flushes of 300000 m3 mid-Dec, early Feb and early March
+# 2/ 600000 m3 between Nov-March when flows at Skipton Bridge < 30 m3/s for > 6 weeks, and 1500000 m3 when flows at SYB < 30 m3/s for > 6 weeks.
+#See details in email from Richard Measures to Tim Kerr 
+FlushFlows   <- FALSE
+OpuhaFlushSize    <- 600000 #cubic metres of water in a day
+OpihiFlushSize    <- 1500000
+OpuhaFlushGapDays <- 42    #days between flows
+OpihiFlushGapDays <- 42    #days between flows
+OpuhaFlushFlowRate <- 25  #These rates are estimated to be the daily equivalentt of a 30 cumec hourly flow rate for a natural event
+OpihiFlushFlowRate <- 25
+#Note that an artificial flushing flow has a lower daily average rate than a natural event as there is no recession.
+
+GraphDisplay          <- FALSE  #or TRUE. This is useful for fault finding and when manual selection of regime changes are needed. 
+```
+
+
+
+Load libraries
+```{r}
+if (!require(dplyr)) install.packages('dplyr'); library(dplyr)     #has the %.% piping function and mutate_if function
+if (!require(zoo)) install.packages('zoo'); library(zoo)
+if (!require(lubridate)) install.packages('lubridate'); library(lubridate)
+if (!require(memisc)) install.packages('memisc'); library(memisc)
+if (!require(tcltk)) install.packages('tcltk'); library(tcltk)     #This has the progress bar function in it
+if (!require(knitr)) install.packages('knitr'); library(knitr)     #Enables simple table output
+
+if (!require(plyr)) install.packages('plyr'); library(plyr)     #Enables easy factor renaming
+
+if (!require(questionr)) install.packages('questionr'); library(questionr)     #Has the handy "freq" function
+if (!require(svDialogs)) install.packages('svDialogs'); library(svDialogs)     #Enables dialog boxes
+if (!require(plotfunctions)) install.packages('plotfunctions'); library(plotfunctions)#Enables error shading with plot_error
+if (!require(MALDIquant)) install.packages('MALDIquant'); library(MALDIquant)#has the match.closest function
+```
+
+#**************************
+#Various Custom functions
+#*************************
+```{r}
+#************************************
+#Function to calculate daily and monthly water take availability time series
+AvailabilitySeries <- function(Directory = DataDirectory,
+                               RestrictionZooSeries=SyntheticSaleYardsBridgeFlow$Restrictions,
+                               AllocationSeasonalSignal = SeasonallyVaryingData[,c(1,3,4,5)]){
+  JulianDay <- as.numeric(format(index(RestrictionZooSeries),"%j"))
+  AllocationSeries <- AllocationSeasonalSignal[match(JulianDay, AllocationSeasonalSignal$`Julian Day`),2:4]
+  FullAllocationZoo <- zoo(AllocationSeries,order.by = index(RestrictionZooSeries))
+  RestrictedAllocationSeries <- AllocationSeries * (1- coredata(RestrictionZooSeries)/100)
+  RestrictedZoo <- zoo(RestrictedAllocationSeries,order.by = index(RestrictionZooSeries))
+  
+  RestrictedAllocationMonthSeries <- aggregate(RestrictedZoo, by = as.yearmon, sum)
+  FullAllocationMonthSeries       <- aggregate(FullAllocationZoo, by = as.yearmon, sum)
+  
+  RestrictedAllocationMonthSeriesCumecs <- aggregate(RestrictedZoo, by = as.yearmon, mean)  
+  FullAllocationMonthSeriesCumecs       <- aggregate(FullAllocationZoo, by = as.yearmon, mean)
+  
+  AvailabilityMonthSeries  <- RestrictedAllocationMonthSeries / FullAllocationMonthSeries
+
+  AvailabilityMonthSeries[which(!is.finite(AvailabilityMonthSeries))] <- 1
+  AvailabilityMonthSeries <- round(AvailabilityMonthSeries,2)
+  names(AvailabilityMonthSeries) <- paste0("Availability - ",names(AvailabilityMonthSeries))
+  
+  names(RestrictedAllocationMonthSeriesCumecs) <- paste0("Restricted Allocation - ",names(RestrictedAllocationMonthSeriesCumecs))
+  
+  names(FullAllocationMonthSeriesCumecs) <- paste0("Full Allocation - ",names(FullAllocationMonthSeriesCumecs))
+
+OutputMonthSeries <- cbind(AvailabilityMonthSeries,FullAllocationMonthSeriesCumecs,RestrictedAllocationMonthSeriesCumecs)
+  #browser()
+  write.zoo(OutputMonthSeries, file.path(DataDirectory,"AllocationAvailabilityMonthSeries.csv"),sep=",",index.name="Month-Year")
+  return()
+  }
+
+#******************************************
+#Function to find the smallest positive number
+minpositive = function(x) min(x[x >= 0])
+
+#**************************************
+#Function to determine the lengths and dates of all periods in a boolean timeseries
+OrderedOccurencePeriodsAndDates <- function(BooleanTimeseries = MinFlowNotMet){
+  #Find the indices of the first days of periods when the minimum flows are not met.
+  IndicesOfStartDatesOfPeriods <- which(diff(c(0,BooleanTimeseries))==1)
+  #Find the length of each of the periods when the minimum flows are not met
+  LengthOfContinuousPeriods <- rle(coredata(BooleanTimeseries))
+  #Convert the run length encoded output from a list to a dataframe
+  LengthOfContinuousPeriods <- as.data.frame(do.call(cbind,LengthOfContinuousPeriods))
+  #Create a dataframe of the dates and lengths of the periods when the minimum flows are not met
+  PeriodLengthsAndDates <- data.frame(Dates = index(BooleanTimeseries[IndicesOfStartDatesOfPeriods]),
+                                      PeriodLength = LengthOfContinuousPeriods$lengths[LengthOfContinuousPeriods$values == 1])
+  #Re-order so that the longest periods are first
+  OrderedPeriodsAndDates <- PeriodLengthsAndDates[order(PeriodLengthsAndDates$PeriodLength, decreasing = TRUE),]
+  return(OrderedPeriodsAndDates)
+}
+
+#**************************************
+#Function to plot input time series data
+PlotTimeSeriesData <- function( LakeData=SyntheticLakeData, 
+                                SyBData=SyntheticSaleYardsBridgeFlow) {
+  #Prepare the y-axis labels
+  LakePlotYAxisLabels <- list(expression("Lake Level\n   (masl)"),
+                              expression("Lake Storage\n (m3 x 10^6)"),
+                              expression(paste("S.Bridge\nflow (m3/s)")))
+  
+  
+  
+  #Put all the plot data together, and scale the lake storage to millions of cubic metres
+  PlotData <- merge(LakeData$`LakeLevel(m)`,
+                    LakeData$`LakeStorage(m3)` / 1000000,       #Converts to million m3
+                    SyBData$Estimated)
+  
+  #Specify the tick mark locations for the x axis
+  ticks <- seq(index(PlotData)[1], index(PlotData)[nrow(PlotData)], by = "1 month")
+  
+  #define the function for putting the xaxis dates on only the third (bottom) graph
+  my.panel <- function(x, y, ..., pf = parent.frame()) {
+    grid(NA,NULL)
+    lines(x, y, ...)
+    if (pf$panel.number == 3) axis(1, at = ticks, labels = format(ticks, "%b-%y"))
+  }
+  
+  #Plot it
+  {
+    plot(PlotData,
+         xaxt = 'n',                              #suppress the xaxis labels so that custom values can be added later 
+         om = c(5,5,3,0),                         #specify the margins so that the y labels fit
+         main = "Synthesised values",
+         xlab="",ylab=LakePlotYAxisLabels,
+         panel = my.panel,                        #This enables panel specific formatting, particularly for the xaxis
+         ylim=list(c(370,392),c(0,72),c(0,12)))
+    
+    #axis.Date(1,at = ticks, labels=format(ticks,"%b %Y"))
+  }
+}
+
+#**********************************************************
+# Function that updates a graph on a graphics device with a point
+UpdateGraph <- function(GraphicsDeviceNumber=1, XData=NA, YData=NA){
+  dev.set(which = GraphicsDeviceNumber)
+  
+  points(XData, YData, col="green")
+}
+
+#***********************************
+# Function to calculate a bunch of statistics
+#This function calculates a range of statistics
+RegimeStats <- function(FlowSeries = SyntheticSaleYardsBridgeFlow$Estimated - SyntheticSaleYardsBridgeFlow$BelowBridgeDemand,
+                        MinFlowSeries=SyntheticSaleYardsBridgeFlow$MinimumFlow,
+                        Level0MinFlowSeries = SyntheticSaleYardsBridgeFlow$NonRestrictedMinimumFlow,
+                        LevelTimeSeries = RegimeLevel,
+                        RestrictionsTimeSeries = SyntheticSaleYardsBridgeFlow$Restrictions
+                              ) {
+  MinYear <- format(min(index(FlowSeries)),"%Y")
+  MaxYear <- format(max(index(FlowSeries)),"%Y")
+  IrrigationIndices <- which(format(index(FlowSeries), "%m") %in% c("10","11","12","01","02","03"))
+  #Fill all the NA's in the regime series with the previous level
+  LevelTimeSeries[1] <- 0
+  LevelTimeSeries <- na.approx(RegimeLevel,method='constant',f=0)
+  #browser()
+  #Create a factor version of the RegimeLevel timeseries
+  #RegimeLevelFactors <- zoo(factor(LevelTimeSeries, labels = c("No Regime","Level 1","Level 2")),order.by=index(LevelTimeSeries))
+  RegimeLevelFactors <- zoo(factor(LevelTimeSeries),order.by=index(LevelTimeSeries))
+  
+  #Find the number of days in Level 1 and Level 2
+  #browser()
+  NoRegimeDays <- sum(RegimeLevelFactors == 1,na.rm=TRUE)
+  Level1Days <- sum(RegimeLevelFactors == 2,na.rm=TRUE)
+  Level2Days <- sum(RegimeLevelFactors == 3,na.rm=TRUE)
+  #Find the number of days on full restrictions
+  FullRestrictionDays <- sum(RestrictionsTimeSeries >= 100,na.rm=TRUE)
+  
+  #Find the number of irrigation days in Level 1 and Level 2
+  #browser()
+  NoRegimeIrrDays <- sum(RegimeLevelFactors[IrrigationIndices] == 1,na.rm=TRUE)
+  Level1IrrDays <- sum(RegimeLevelFactors[IrrigationIndices] == 2,na.rm=TRUE)
+  Level2IrrDays <- sum(RegimeLevelFactors[IrrigationIndices] == 3,na.rm=TRUE)
+  PercentIrrSeasonInLevel2 <-round(Level2IrrDays / length(IrrigationIndices) * 100,2)
+  #Find the number of days on full restrictions
+  FullRestrictionIrrDays <- sum(RestrictionsTimeSeries[IrrigationIndices] >= 100,na.rm=TRUE)
+  
+  #find the total number of days in each regime for each year
+  AnnualTotals <- aggregate(RegimeLevelFactors, by= as.numeric(format(index(RegimeLevelFactors),"%Y")), table)
+  
+  #For each regime, find the frequency of years with the regime ocurring
+  Frequencies <- sapply(AnnualTotals, function(SingleRegimeLevel) sum(SingleRegimeLevel > 0) / length(index(AnnualTotals)))
+
+  #Determine the amount of time the minimum flows are not met.
+MinFlowNotMet <- FlowSeries < MinFlowSeries
+DaysMinFlowNotMet <- sum(MinFlowNotMet)
+#browser()
+AnnualMinFlowsNotMet <- aggregate(MinFlowNotMet, by= as.numeric(format(index(MinFlowNotMet),"%Y")), sum)
+MinFlowNotMetYearFreq <- sum(AnnualMinFlowsNotMet > 0) / length(index(AnnualMinFlowsNotMet))
+
+#Find the longest period of min flows not being met, and when
+MinFlowsNotMetPeriodsAndDates2 <- OrderedOccurencePeriodsAndDates(MinFlowNotMet)
+
+#Determine the fraction of time that minimum flows are not met
+MinFlowReliability <- 1 - (DaysMinFlowNotMet / length(index(MinFlowNotMet)))
+
+#Determine the amount of time the non-restricted minimum flows are not met.
+Level0MinFlowNotMet <- FlowSeries < Level0MinFlowSeries
+DaysLevel0MinFlowNotMet <- sum(Level0MinFlowNotMet)
+
+#Calculate the reliability of meeting the non-restricted minimum flow requirements
+Level0MinFlowReliability <- 1 - (DaysLevel0MinFlowNotMet / length(index(Level0MinFlowNotMet)))
+
+#Determine the amount of time the ecological minimum flows are not met.
+EcoMinFlowNotMet <- FlowSeries < 3
+DaysEcoFlowNotMet <- sum(EcoMinFlowNotMet)
+
+#Calculate the reliability of meeting the ecological minimum flow requirements
+EcoFlowReliability <- 1 - (DaysEcoFlowNotMet / length(index(EcoMinFlowNotMet)))
+
+#Determine the amount of time the connectivity flows are not met.
+ConnectivityFlowNotMet <- FlowSeries < 2
+DaysConnectivityFlowNotMet <- sum(ConnectivityFlowNotMet)
+
+#Calculate the reliability of meeting the connectivity flow requirements
+ConnectivityFlowReliability <- 1 - (DaysConnectivityFlowNotMet / length(index(ConnectivityFlowNotMet)))
+
+ConnectivityFlowsNotMetPeriodsAndDates2 <- OrderedOccurencePeriodsAndDates(ConnectivityFlowNotMet)
+#browser()
+return(data.frame('Years' = paste(MinYear,"to", MaxYear),
+  #'YearFractionOccOfLevel1'=Frequencies[2],
+  #       'YearFractionOccOfLevel2'=Frequencies[3],
+  #       'YearFractionMinFlowsNotMet'=MinFlowNotMetYearFreq,
+         'DaysWithoutRestrictions'=NoRegimeDays,
+         'DaysWithFullRestrictions'=FullRestrictionDays,
+         'DaysInLevel1'=Level1Days,
+         'DaysInLevel2'=Level2Days,
+         'IrrDaysInLevel1'=Level1IrrDays,
+         'IrrDaysInLevel2'=Level2IrrDays,
+         'PercentIrrSeasonInLevel2'=PercentIrrSeasonInLevel2,
+         'IrrDaysFullRestrictions'=FullRestrictionIrrDays,
+         'DaysMinFlowNotMet'=DaysMinFlowNotMet,
+         'LongestPeriodOfMinFlowsNotMet' = MinFlowsNotMetPeriodsAndDates2$PeriodLength[1],
+         'DateOfLongestPeriod' =  format(MinFlowsNotMetPeriodsAndDates2$Dates[1], "%B, %Y"),
+         'MinFlowReliability'=MinFlowReliability,
+         'DaysLevel0MinFlowNotMet'=DaysLevel0MinFlowNotMet,
+         'Level0MinFlowReliability'=Level0MinFlowReliability,
+         'DaysEcoFlowNotMet'=DaysEcoFlowNotMet,
+         'EcoFlowReliability'=EcoFlowReliability,
+         'DaysConnectivityFlowNotMet'=DaysConnectivityFlowNotMet,
+         'ConnectivityFlowReliability'=ConnectivityFlowReliability,
+         'LongestPeriodOfConnectivityFlowNotMet' = ConnectivityFlowsNotMetPeriodsAndDates2$PeriodLength[1],
+         'DateOfLongestPeriodOfConnectivityFlowNotMet' =  format(ConnectivityFlowsNotMetPeriodsAndDates2$Dates[1], "%B, %Y")))
+}
+
+#**********************************************************
+#Function to compare availability to demand, and find out how often demand is not met
+#Two sections, below dam and below Sale Yards Bridge.
+#Amount of time on restrictions
+#To do this I need a time series of the restriction level   
+#Amount of water not provided as a percentage of total requirement
+#Calculate the reliability of meeting the current ORRP minimum flow requirements
+#Create a series of julian days to match the timeseries
+
+IrrigationStats <- function(SyntheticData = SyntheticSaleYardsBridgeFlow, 
+                            SeasonalData = SeasonallyVaryingData){
+  
+  SyntheticData$JulianDay <- as.numeric(format(index(SyntheticData), "%j"))
+
+  MainStemDemandSeries <- SeasonalData$'Allocation Demand Between Dam and Saleyards'[match(SyntheticData$JulianDay,SeasonalData$`Julian Day` )]
+  
+  SyntheticData$MainStemAllocationAvailable <- (100 - SyntheticData$Restrictions)/100 * MainStemDemandSeries
+  
+  VolumetricAvailability <- sum(SyntheticData$MainStemAllocationAvailable) / sum(MainStemDemandSeries)
+  
+  NonFullRestrictionFrequency <- sum(SyntheticData$Restrictions[which(MainStemDemandSeries > 0)] < 100) / sum(MainStemDemandSeries > 0)
+  
+  AvailabilityFrequency <- sum(SyntheticData$Restrictions[which(MainStemDemandSeries > 0)] == 0) / sum(MainStemDemandSeries > 0)
+  
+  #Calculate the amount of water (absolute and percentage) given up by the river during low flow management regimes
+  RiverWaterSacrificedDuringLowFlowRegimes <- sum((SyntheticData$NonRestrictedMinimumFlow - SyntheticData$MinimumFlow) * 24 * 60 * 60)
+  
+  RiverWaterSacrificedDuringLowFlowRegimesPercent <- RiverWaterSacrificedDuringLowFlowRegimes / sum((SyntheticData$NonRestrictedMinimumFlow[SyntheticData$NonRestrictedDemand > 0]) * 24 * 60 * 60) * 100
+  
+  #Calculate the amount of water (absolute and percentage) not provided as allocation during low flow management regimes
+  AllocationSacrificedDuringLowFlowRegimes <- sum((SyntheticData$NonRestrictedDemand - SyntheticData$BelowBridgeDemand - SyntheticData$MainStemDemand) * 24 * 60 * 60)
+  
+  AllocationSacrificedDuringLowFlowRegimesPercent <- AllocationSacrificedDuringLowFlowRegimes / sum((SyntheticData$NonRestrictedDemand) * 24 * 60 * 60) * 100
+  
+  #need to show the number of years with at least 95 % volume and time availability
+  #Sum the irrigation available for each year
+  IrrigationAvailableVolumeEachYear <- aggregate(SyntheticData$MainStemAllocationAvailable, by= format(index(SyntheticData), "%Y"), FUN=sum)
+  
+  IrrigationDemandVolumeEachYear <- aggregate(MainStemDemandSeries, by= list(format(index(SyntheticData), "%Y")), FUN=sum)
+  
+  PercentOfYearsWithMoreThan95pctAvailability <- sum(IrrigationAvailableVolumeEachYear/as.numeric(t(IrrigationDemandVolumeEachYear$x)) > 0.95) / length(IrrigationAvailableVolumeEachYear)
+
+  IrrigationStatistics <- data.frame(
+  "PercentOfYearsWithMoreThan95pctAvailability" = PercentOfYearsWithMoreThan95pctAvailability,
+  "VolumetricAvailability" = VolumetricAvailability,
+  "AvailabilityFrequency" = AvailabilityFrequency,
+  "NonFullRestrictionFrequency" = NonFullRestrictionFrequency,
+  "AllocationSacrificedDuringLowFlowRegimes" = AllocationSacrificedDuringLowFlowRegimes,
+  "AllocationSacrificedDuringLowFlowRegimesPercent" = AllocationSacrificedDuringLowFlowRegimesPercent,
+  "RiverWaterSacrificedDuringLowFlowRegimes" = RiverWaterSacrificedDuringLowFlowRegimes,
+  "RiverWaterSacrificedDuringLowFlowRegimesPercent" = RiverWaterSacrificedDuringLowFlowRegimesPercent,
+  #"IrrigationAvailableVolumeEachYear" = IrrigationAvailableVolumeEachYear,
+  #"IrrigationDemandVolumeEachYear" = IrrigationDemandVolumeEachYear,
+  "PercentOfYearsWithMoreThan95pctAvailability" = PercentOfYearsWithMoreThan95pctAvailability
+      )
+}
+
+
+#***********************************************************
+# Function to calculate the climatology of a timeseries
+# Outputs a 366 day zoo series with median, 10th and 90th percentile plots 
+Climatologise <- function(ZooDailyTimeseries=NULL){
+  #browser()
+  JulianDaySeries <- as.numeric(format(index(ZooDailyTimeseries),"%j"))
+  Climatology <- aggregate(ZooDailyTimeseries,by=JulianDaySeries, FUN = quantile, probs=c(0.1,0.5,0.9))
+  #Now repeat it three times, smooth it, and pull out the middle third. 
+  ClimatologySmoothed <- lapply(Climatology, function(SingleSeries) {
+    #browser()
+    SingleSeriesDF <- as.data.frame(SingleSeries)
+    TripleLengthSeries <- rbind(SingleSeriesDF,rbind(SingleSeriesDF,SingleSeriesDF))
+    names(TripleLengthSeries) <- "Values"
+    TripleLengthSeries$Count <- seq(1:nrow(TripleLengthSeries))
+    loess(Values ~ Count,data=TripleLengthSeries,span = 0.2)$fitted[367:732]
+  })
+  ClimatologySmoothed <- do.call(cbind,ClimatologySmoothed)
+  
+  
+  ClimatologySmoothed <- data.frame("Julian Day"=seq(1:366),ClimatologySmoothed)
+  return(ClimatologySmoothed)
+}
+
+#*****************************
+# Function to turn the restrictions input file into a timeseries
+#*****************************
+RestrictionsTimeSeries <- function(RestrictionsTable= SeasonallyVaryingRestrictions){
+  #browser()
+  JulianDay <- seq(1:366)
+  Level1Restrictions <- rep(NA,366)
+  Level2Restrictions <- rep(NA,366)
+  Level1RestrictionVector <- RestrictionsTable[(RestrictionsTable$Level == 1 & RestrictionsTable$"Lake Level (masl)" == 393),]
+  Level2RestrictionVector <- RestrictionsTable[(RestrictionsTable$Level == 2 & RestrictionsTable$"Lake Level (masl)" == 393),]
+  for (Day in JulianDay) {
+    #browser()
+    Level1Restrictions[Day] <-  Level1RestrictionVector[(Day - Level1RestrictionVector$'Julian Day'
+                                        == minpositive(Day - Level1RestrictionVector$'Julian Day')),'Restrictions (%)']
+    
+    Level2Restrictions[Day] <-  Level2RestrictionVector[(Day - Level2RestrictionVector$'Julian Day'
+                                        == minpositive(Day - Level2RestrictionVector$'Julian Day')),'Restrictions (%)']
+  }
+  return(data.frame('JulianDay' = JulianDay,
+                    'Level1Restrictions' = Level1Restrictions,
+                    'Leve21Restrictions' = Level2Restrictions))
+}
+
+#*****************************
+# Function to turn the Inflow triggers input file into a timeseries
+#*****************************
+InflowTriggerTimeSeries <- function(InflowTriggersTable= InflowTriggersData){
+  if (!require(data.table)) install.packages('data.table'); library(data.table)
+  #Create a 366 day vector for each level ready to be filled
+  JulianDay <- seq(1:366)
+  Level1InflowTriggers <- rep(NA,366)
+  Level2InflowTriggers <- rep(NA,366)
+  
+  #Fill with the values available
+  Level1InflowTriggers[InflowTriggersTable$'Julian Day'] <- InflowTriggersTable$'Level1'
+  Level2InflowTriggers[InflowTriggersTable$'Julian Day'] <- InflowTriggersTable$'Level2'
+  
+  #Now fill the gaps
+  Level1InflowTriggers <- nafill(Level1InflowTriggers,type="locf")
+  Level2InflowTriggers <- nafill(Level2InflowTriggers,type="locf")
+  
+  return(data.frame('Julian Day' = JulianDay,
+                    'Level1' = Level1InflowTriggers,
+                    'Leve21' = Level2InflowTriggers,check.names = FALSE))
+}
+
+```
+
+
+#*********************************************
+# Set the project directories and input filenames
+#**********************************************
+Many of these must be in a directory that matches the version being tested, i.e. by the "LowFlowManagementType" variable
+```{r}
+ProjectDirectory <- "G:\\ARL Projects\\RD Projects\\RD18004_Lake Opuha Further Work\\Potential Available Volume" #At Aqualinc
+ProjectDirectory <- "H:\\RD Projects\\RD18004_Lake Opuha Further Work\\Potential Available Volume"               #At Rainfall.NZ via connection to Aqualilnc server
+ProjectDirectory <- "D:\\Projects\\Aqualinc\\projects\\OpuhaAMWG"            #At Rainfall.NZ
+DataDirectory    <- file.path(ProjectDirectory,"Data")
+
+
+SeasonallyVaryingDataFilename            <- file.path(DataDirectory, "SeasonalEvapAndAllocation.csv")
+SeasonallyVaryingMinimumFlowDataFileName <- file.path(DataDirectory,LowFlowManagementType, "MinimumFlows.csv")
+SeasonallyVaryingRestrictionsFile        <- file.path(DataDirectory,LowFlowManagementType, "Restrictions.csv")
+
+LakeInflowTriggersFileName               <- file.path(DataDirectory,LowFlowManagementType, "InflowTriggers.csv")
+LakeLevelTriggersFileName                <- file.path(DataDirectory,LowFlowManagementType, "LevelTriggers.csv")
+SnowTriggersFileName                     <- file.path(DataDirectory,LowFlowManagementType, "SnowTriggers.csv")
+
+LakeLevelToAreaAndVolumeFile             <- file.path(DataDirectory, "LakeLevelAreaVolume.csv")
+
+InflowsTeAnaWaiRockwoodSnowFile          <- file.path(DataDirectory, "TimeSeriesData.csv")
+LakeStorageOperatingIntentFile           <- file.path(DataDirectory, "LakeStorageOperatingIntent.csv")
+#LakeStorageOperatingIntentFile           <- file.path(DataDirectory, "LakeStorageOperatingIntent-90pctMax.csv")
+```
+
+
+
+# 
+# ******************
+# Load all the data
+#******************
+```{r}
+LakeStorageOperatingIntentData <- read.csv(LakeStorageOperatingIntentFile, check.names = FALSE, colClasses = c("numeric","numeric","numeric"))
+
+
+SeasonallyVaryingData <- read.csv(SeasonallyVaryingDataFilename, check.names = FALSE)
+SeasonallyVaryingMinimumFlowData <- read.csv(SeasonallyVaryingMinimumFlowDataFileName, check.names = FALSE)
+SeasonallyVaryingRestrictions <- read.csv(SeasonallyVaryingRestrictionsFile, check.names = FALSE)
+
+SeasonallyVaryingRestrictionsFull <- RestrictionsTimeSeries(RestrictionsTable = SeasonallyVaryingRestrictions)
+
+LakeInflowTriggers <- read.csv(LakeInflowTriggersFileName, check.names = FALSE)
+LakeInflowTriggersFull            <- InflowTriggerTimeSeries(LakeInflowTriggers) 
+LakeLevelTriggers <- read.csv(LakeLevelTriggersFileName, check.names = FALSE)
+SnowTriggers <- read.csv(SnowTriggersFileName, check.names = FALSE)
+
+LakeLevelToAreaAndVolume <- read.csv(LakeLevelToAreaAndVolumeFile, check.names = FALSE,colClasses = c("numeric","numeric","numeric") )
+
+#Load the input timeseries as a zoo structure
+InflowsTeAnaWaiRockwoodSnow <- read.zoo(InflowsTeAnaWaiRockwoodSnowFile, format = "%d/%m/%Y",sep= ",",header=TRUE,colClasses = c("character","numeric","numeric","numeric","numeric"))
+
+InflowsTeAnaWaiRockwoodSnowClimatology <- Climatologise(InflowsTeAnaWaiRockwoodSnow)
+```
+
+# *************************************
+# Set some constants and initialise some variable ready for populating later
+#************************************
+```{r}
+
+
+ParameterAveraging <- list(AMWG= c(LakeLevel = 7, Inflows = 30, Snow = 30),
+                           AMWG15= c(LakeLevel = 7, Inflows = 30, Snow = 30),
+                           AMWGwithMonthlyThresholds=c(LakeLevel = 7, Inflows = 30, Snow = 30),
+                           AMWGwithPC7MinFlows=c(LakeLevel = 7, Inflows = 30, Snow = 30),
+                           AMWGwithPC7Restrictions=c(LakeLevel = 7, Inflows = 30, Snow = 30),
+                           AMWG201908_15Day=c(LakeLevel = 7, Inflows = 30, Snow = 30),
+                           AMWG20190827_1Day2030=c(LakeLevel = 7, Inflows = 30, Snow = 30),
+                           PC7Proposed2025 = c(LakeLevel = 30, Inflows = 30, Snow = 30),
+                           PC7Proposed2030withAMWGMinFlows = c(LakeLevel = 30, Inflows = 30, Snow = 30),
+                           PC7Proposed2030withAMWGRestrictions = c(LakeLevel = 30, Inflows = 30, Snow = 30),
+                           PC7Proposed2030withDailyThresholds = c(LakeLevel = 30, Inflows = 30, Snow = 30),
+                           PC7Proposed2030variableLakeThreshold = c(LakeLevel = 30, Inflows = 30, Snow = 30),
+                           PC7Proposed2030 = c(LakeLevel = 30, Inflows = 30, Snow = 30),
+                           PC7Proposed2030WithAMWGInflowThresholds = c(LakeLevel = 30, Inflows = 30, Snow = 30),
+                           Section42a = c(LakeLevel = 30, Inflows = 30, Snow = 30),
+                           ORRP = c(LakeLevel = 1, Inflows = 1, Snow = 1))
+
+ProcessingDateRange <- range(index(InflowsTeAnaWaiRockwoodSnow))
+
+InitialJulianDay <- as.numeric(format(index(InflowsTeAnaWaiRockwoodSnow)[1], "%j"))
+InitialDateNumber <- as.numeric(index(InflowsTeAnaWaiRockwoodSnow)[1])
+
+#Assume that lake is in the middle of its operating intent to start with
+InitialStorage <- rowMeans(LakeStorageOperatingIntentData[LakeStorageOperatingIntentData$`Julian Day`== InitialJulianDay,c('Lower Intent','Upper Intent')]) * MaximumCapacity
+
+#Set storage to 0 if there is no dam
+CurrentLakeStorage <- InitialStorage * DamExists
+
+#Lookup the lake level for the current storage
+CurrentLakeLevel <- LakeLevelToAreaAndVolume$`Lake Level (masl)`[which.min(abs(LakeLevelToAreaAndVolume$`Available Volume (m3)` - InitialStorage))] 
+
+#Assume no low flow management initially
+CurrentLowFlowManagementLevel <- 0
+
+#For the AMWG regimes, a regime stays set for a minimum of 14 days. by setting this variable to 14 at the begining, regime switching can occur immediately
+DaysSinceLevelInitiated <- 14
+#For the AMWG regimes, it is necesary to keep track of the previous days 
+PreviousLowFlowManagementLevel <- 0
+```
+ 
+
+# *************************************
+# *************************************
+# THE MAIN EVENT
+#**************************************
+#*************************************
+# Now start to calculate lake levels, day by day.
+# Note that I need to calculate the previous week of inflows and lake levels for the thresholds in AMWG but by month in PC7
+```{r}
+graphics.off()
+#Select the year(s) of interest
+
+#Get the time stamp of the current run
+CurrentRunTimeStamp <- format(Sys.time(),"%Y%m%d-%H-%M")
+
+if(SelectYears) {
+  #Open a dialog box and select the years of interest. Start from June 1st and go through to May 30th
+  YearsOfInterest <- select.list(title = "Select Year(s)", as.character(seq(1999,2016,by = 1)),graphics=TRUE,preselect = "2008",multiple = TRUE)
+} else {
+  YearsOfInterest <- as.character(seq(1999,2016,by = 1))
+}
+
+FirstYearOfInterest         <- min(as.numeric(YearsOfInterest))
+StartDate                   <- as.Date(paste(FirstYearOfInterest,"0601"),format="%Y%m%d")
+LastYearOfInterest          <- max(as.numeric(YearsOfInterest))
+EndDate                     <- as.Date(paste(LastYearOfInterest+1,"0530"),format="%Y%m%d")
+LimitedPeriod               <- window(InflowsTeAnaWaiRockwoodSnow, start = StartDate, end = EndDate)
+LimitedPeriod$JulianDay     <- as.numeric(format(index(LimitedPeriod),"%j"))
+LimitedPeriod$InflowLevel1  <- LakeInflowTriggersFull$Level1[match(LimitedPeriod$JulianDay,LakeInflowTriggersFull$`Julian Day`)]
+LimitedPeriod$InflowLevel2  <- LakeInflowTriggersFull$Level2[match(LimitedPeriod$JulianDay,LakeInflowTriggersFull$`Julian Day`)]
+LimitedPeriod$SnowLevel1    <- SnowTriggers$Level1[match(LimitedPeriod$JulianDay,SnowTriggers$`Julian Day`)]
+LimitedPeriod$SnowLevel2    <- SnowTriggers$Level2[match(LimitedPeriod$JulianDay,SnowTriggers$`Julian Day`)]
+LimitedPeriod$LakeLevel1    <- LakeLevelTriggers$Level1[match(LimitedPeriod$JulianDay,LakeLevelTriggers$`Julian Day`)]
+LimitedPeriod$LakeLevel2    <- LakeLevelTriggers$Level2[match(LimitedPeriod$JulianDay,LakeLevelTriggers$`Julian Day`)]
+LimitedPeriod$MinFlowLevel0 <- SeasonallyVaryingMinimumFlowData$Level0[match(LimitedPeriod$JulianDay,SeasonallyVaryingMinimumFlowData$`Julian Day`)]
+LimitedPeriod$MinFlowLevel1 <- SeasonallyVaryingMinimumFlowData$Level1[match(LimitedPeriod$JulianDay,SeasonallyVaryingMinimumFlowData$`Julian Day`)]
+LimitedPeriod$MinFlowLevel2 <- SeasonallyVaryingMinimumFlowData$Level2[match(LimitedPeriod$JulianDay,SeasonallyVaryingMinimumFlowData$`Julian Day`)]
+
+#Convert lake operating intent from storage fraction to lake level
+#Do this!!!!!!
+LakeLevelOperatingIntent <- LakeStorageOperatingIntentData
+LakeLevelOperatingIntent$`Lower Intent` <- LakeLevelToAreaAndVolume$`Lake Level (masl)`[match.closest(LakeStorageOperatingIntentData$`Lower Intent`*MaximumCapacity,LakeLevelToAreaAndVolume$`Available Volume (m3)`)]
+LakeLevelOperatingIntent$`Upper Intent` <- LakeLevelToAreaAndVolume$`Lake Level (masl)`[match.closest(LakeStorageOperatingIntentData$`Upper Intent`*MaximumCapacity,LakeLevelToAreaAndVolume$`Available Volume (m3)`)]
+
+MatchedOperatingIntent <- LakeLevelOperatingIntent[match(LimitedPeriod$JulianDay,LakeLevelOperatingIntent$`Julian Day`),]
+MatchedOperatingIntentZoo <- zoo(MatchedOperatingIntent,order.by = index(LimitedPeriod))
+LimitedPeriod <- merge(LimitedPeriod,MatchedOperatingIntentZoo)
+
+MatchedClimatologies <- InflowsTeAnaWaiRockwoodSnowClimatology[match(LimitedPeriod$JulianDay,InflowsTeAnaWaiRockwoodSnowClimatology$`Julian.Day`),]
+MatchedClimatologiesZoo <- zoo(MatchedClimatologies,order.by = index(LimitedPeriod))
+LimitedPeriod <- merge(LimitedPeriod,MatchedClimatologiesZoo)
+
+LimitedPeriod$`Allocation Demand Between Dam and Saleyards` <- SeasonallyVaryingData$`Allocation Demand Between Dam and Saleyards`[match(LimitedPeriod$JulianDay,SeasonallyVaryingData$`Julian Day`)]
+LimitedPeriod$`Allocation demand between Te Ngawai and Saleyards Bridge` <- SeasonallyVaryingData$`Allocation demand between Te Ngawai and Saleyards Bridge`[match(LimitedPeriod$JulianDay,SeasonallyVaryingData$`Julian Day`)]
+LimitedPeriod$`Allocation below Saleyards` <- SeasonallyVaryingData$`Allocation below Saleyards`[match(LimitedPeriod$JulianDay,SeasonallyVaryingData$`Julian Day`)]
+
+LimitedPeriod$`Level1Restrictions` <- SeasonallyVaryingRestrictionsFull$Level1Restrictions[match(LimitedPeriod$JulianDay,SeasonallyVaryingRestrictionsFull$JulianDay)]
+LimitedPeriod$`Level2Restrictions` <- SeasonallyVaryingRestrictionsFull$Leve21Restrictions[match(LimitedPeriod$JulianDay,SeasonallyVaryingRestrictionsFull$JulianDay)]
+
+
+#Initialise empty timeseries for the synthesised Saleyards bridge and the Lake level/storage. Dates match the input timeseries
+SyntheticSaleYardsBridgeFlow <- zoo(cbind('Estimated' = as.numeric(rep(NA,nrow(LimitedPeriod))),
+                                          'BelowBridgeDemand' = as.numeric(rep(NA,nrow(LimitedPeriod))),
+                                          'MinimumFlow' = as.numeric(rep(NA,nrow(LimitedPeriod))),
+                                          'NonRestrictedMinimumFlow' = as.numeric(rep(NA,nrow(LimitedPeriod))),
+                                          'MainStemDemand' = as.numeric(rep(NA,nrow(LimitedPeriod))),
+                                          'NonRestrictedDemand' = as.numeric(rep(NA,nrow(LimitedPeriod))),
+                                          'LakeThresholdCrossed' = as.numeric(rep(NA,nrow(LimitedPeriod))),
+                                          'InflowThresholdCrossed' = as.numeric(rep(NA,nrow(LimitedPeriod))),
+                                          'SnowThresholdCrossed' = as.numeric(rep(NA,nrow(LimitedPeriod))),
+                                          'SumOfThresholdsSquared' = as.numeric(rep(NA,nrow(LimitedPeriod))),
+                                          'Restrictions' = as.numeric(rep(NA,nrow(LimitedPeriod)))),
+                                    order.by = index(LimitedPeriod))
+SyntheticLakeData<- zoo(cbind('LakeLevel(m)' = rep(NA,nrow(LimitedPeriod)),
+                              'LakeStorage(m3)' = rep(NA,nrow(LimitedPeriod))),
+                        order.by = index(LimitedPeriod))
+RegimeLevel <- zoo(rep(NA,nrow(LimitedPeriod)),order.by = index(LimitedPeriod) )
+
+AveragedIndicators <- zoo(cbind('SnowAve' = rep(NA,nrow(LimitedPeriod)),
+                                'InflowsAve' = rep(NA,nrow(LimitedPeriod)),
+                                'LakeLevelAve' = rep(NA,nrow(LimitedPeriod))),
+                          order.by = index(LimitedPeriod))
+
+#CreateTimeSeries <- function(InflowsTeAnaWaiRockwoodSnow,LakeLevelToAreaAndVolume,LowFlowManagementType,SeasonallyVaryingMinimumFlowData,SeasonallyVaryingRestrictions,LakeStorageOperatingIntentData,SeasonallyVaryingData,LakeLevelTriggers,LakeInflowTriggers,SnowTriggers)
+
+Restrictions <- 0
+
+#Initialise parameters
+ProcessingDateRange <- range(index(LimitedPeriod))
+
+InitialJulianDay    <- as.numeric(format(index(LimitedPeriod)[1], "%j"))
+InitialDateNumber   <- as.numeric(index(LimitedPeriod)[1])
+
+#Assume that lake is in the middle of its operating intent to start with
+InitialStorage      <- rowMeans(LakeStorageOperatingIntentData[LakeStorageOperatingIntentData$`Julian Day`== InitialJulianDay,c('Lower Intent','Upper Intent')]) * MaximumCapacity
+
+#Set storage to 0 if there is no dam
+CurrentLakeStorage  <- InitialStorage * DamExists
+
+#Lookup the lake level for the current storage
+CurrentLakeLevel    <- LakeLevelToAreaAndVolume$`Lake Level (masl)`[which.min(abs(LakeLevelToAreaAndVolume$`Available Volume (m3)` - InitialStorage))] 
+
+#Assume no low flow management initially
+CurrentLowFlowManagementLevel <- 0
+
+#For the AMWG regimes, a regime stays set for a minimum of 14 days. by setting this variable to 14 at the begining, regime switching can occur immediately
+DaysSinceLevelInitiated <- 14
+#For the AMWG regimes, it is necesary to keep track of the previous days 
+PreviousLowFlowManagementLevel <- 0
+
+#Initialise graphs
+if (GraphDisplay) {
+  #Get the pixel dimensions of the screen
+  ScreenPixelWidth <- as.numeric(system("wmic desktopmonitor get screenwidth",intern=TRUE)[2])
+  ScreenPixelHeight <- as.numeric(system("wmic desktopmonitor get screenheight",intern=TRUE)[2])
+  
+  x11(width=5,height=2.5,xpos=trunc(ScreenPixelWidth / 3),ypos=1,title = "Opihi at Saleyards") #Graphics Device 2
+  par(mar=c(2,2,2,0))
+  x11(width=5,height=2.5,xpos=-1,ypos=1,title = "Lake Opuha") #Graphics Device 3
+  par(mar=c(2,2,2,0))
+  x11(width=5,height=2.5,xpos=1,ypos=trunc(ScreenPixelHeight / 3),title = "Snow") #Graphics Device 4
+  par(mar=c(2,2,2,0))
+  x11(width=5,height=2.5,xpos=trunc(ScreenPixelWidth / 3),ypos=trunc(ScreenPixelHeight / 3),title = "Inflows") #Graphics Device 5
+  par(mar=c(2,2,2,0))
+  x11(width=5,height=2.5,xpos=-1,ypos=trunc(ScreenPixelHeight / 3),title = "Tributary flows") #Graphics Device 6
+  par(mar=c(2,2,2,0))
+  x11(width=5,height=2.5,xpos=-1,ypos=-25,title = "Allocation Demand") #Graphics Device 7
+  par(mar=c(2,2,2,0))
+  
+  #Plot allocation demand
+  dev.set(which = 7)
+  plot.zoo(LimitedPeriod$`Allocation Demand Between Dam and Saleyards`,ylim=c(0,5), main = "Allocation demand",xlab="",ylab="cumecs",col="black",lty=2)
+  lines(LimitedPeriod$`Allocation below Saleyards`, col="blue",lty=2)
+  lines(LimitedPeriod$`Allocation demand between Te Ngawai and Saleyards Bridge`, col="green",lty=2)
+  legend("topleft",legend=c("Opihi between dam and Saleyards Bridge","Below Saleyards Bridge","Between Te Ana Wai and the Opihi"),col=c("black","blue","green"),lty = 1, bty="n")
+  
+  #Plot tributaries
+  dev.set(which = 6)
+  plot.zoo(LimitedPeriod$Opihi.at.Rockwood * 0, ylim=c(0,30),main="Tributary flows",xlab="",ylab="cumecs",col="white")
+  lines(LimitedPeriod$Opihi.at.Rockwood.10.,col = "blue",lty=2)
+  lines(LimitedPeriod$Te.Ana.Wai.10.,col = "black",lty=2)
+  legend("topleft",legend = c("Opihi at Rockwood","Te Ana Wai at Cave","Opihi 10th %ile","Te Ana Wai 10th %ile"),col=c("blue","black","blue","black"),lty = c(1,1,2,2),bty="n")
+  
+  #Plot inflows
+  dev.set(which = 5)
+  plot.zoo(LimitedPeriod$Inflow * 0, ylim=c(0,30),main="Inflows",xlab="",ylab="cumecs",col="white")
+  with(LimitedPeriod, {polygon(x = c(index(LimitedPeriod),rev(index(LimitedPeriod))),
+                               y=c(coredata(Inflow.90.),rev(coredata(Inflow.10.))),
+                               col = "lightgrey",border=NA)})
+  lines(LimitedPeriod$Inflow.50.,lty=2)
+  lines(LimitedPeriod$InflowLevel1, col="orange")
+  lines(LimitedPeriod$InflowLevel2, col="red")
+  legend("topleft",legend = c("30 day Average Inflow","Daily Inflow","Level 1 threshold","Level 2 threshold","median","10 - 90th %ile"),col=c("green","black","orange","red","black",NA),lty = c(1,1,1,1,2,NA),fill=c(NA,NA,NA,NA,NA,"lightgrey"),border=c(NA,NA,NA,NA,NA,NA),bty="n",ncol=2)
+  
+  #Plot Snow storage
+  dev.set(which = 4)
+  plot.zoo(LimitedPeriod$SnowStorage * 0, ylim=c(0,max(LimitedPeriod$SnowStorage)),main="Snow",xlab="",ylab="millions of m3 of water equivalent",col="white")
+  with(LimitedPeriod, {polygon(x = c(index(LimitedPeriod),rev(index(LimitedPeriod))),
+                               y=c(coredata(SnowStorage.90.),rev(coredata(SnowStorage.10.))),
+                               col = "lightgrey",border=NA)})
+  lines(LimitedPeriod$SnowStorage.50.,lty=2)
+  lines(LimitedPeriod$SnowLevel1, col="orange")
+  lines(LimitedPeriod$SnowLevel2, col="red")
+  legend("topright",legend = c("30 day Average snow","Daily snow","Level 1 threshold","Level 2 threshold","median","10 - 90th %ile"),col=c("green","black","orange","red","black",NA),lty = c(1,1,1,1,2,NA),fill=c(NA,NA,NA,NA,NA,"lightgrey"),border=c(NA,NA,NA,NA,NA,NA),bty="n",ncol=2)
+  
+  #Plot lake level
+  dev.set(which = 3)
+  plot.zoo(LimitedPeriod$LakeLevel2 * 0, ylim=c(370,392),main="Lake Level",xlab="",ylab="metres above sea level",col="white")
+  with(LimitedPeriod, {polygon(x = c(index(LimitedPeriod),rev(index(LimitedPeriod))),
+                               y=c(coredata(`Upper Intent`),rev(coredata(`Lower Intent`))),
+                               col = "lightgrey",border=NA)})
+  lines(LimitedPeriod$LakeLevel1, col="orange")
+  lines(LimitedPeriod$LakeLevel2, col="red")
+  legend("bottomleft",legend = c("7 day Average level","Daily level","Level 1 threshold","Level 2 threshold","Operating Intent"),col=c("green","black","orange","red","NA"),lty = c(1,1,1,1,NA),fill=c(NA,NA,NA,NA,"lightgrey"),border=c(NA,NA,NA,NA,NA),bty="n")
+  
+  #Plot Saleyards Bridge
+  dev.set(which = 2)
+  plot.zoo(LimitedPeriod$MinFlowLevel0 * 0, ylim=c(0,30),main="Opihi at Saleyards",xlab="",ylab="cumecs",col="white")
+  lines(LimitedPeriod$MinFlowLevel0 + LimitedPeriod$`Allocation below Saleyards`, col="black")
+  lines(LimitedPeriod$MinFlowLevel1 + LimitedPeriod$`Allocation below Saleyards` * (100 - LimitedPeriod$Level1Restrictions) / 100, col="orange")
+  lines(LimitedPeriod$MinFlowLevel2 + LimitedPeriod$`Allocation below Saleyards` * (100 - LimitedPeriod$Level2Restrictions) / 100, col="red")
+  legend("topright",legend = c("Daily flow","Level 0 min","Level 1 min","Level 2 min"),col=c("green","black","orange","red"),lty = c(1,1,1,1),bty="n")
+  
+  
+  
+  #Pause to get the graphs ready
+  tkmessageBox(title="Ready Set Go",message="when you are ready",type="ok")
+  #dlg_message(message="Ready to go?", type = "ok")$res
+}
+
+#Initialise a progress bar for the upcoming loop through the days
+pb = tkProgressBar(title = "Processing Daily Data",min = 0, max = length(index(LimitedPeriod)), initial = 0)
+
+#***********************
+#Daily loop starts here
+#**********************
+#loop through each day, figuring out flows and lake levels along the way
+for (DateNumber in index(LimitedPeriod)) {#
+  
+  PreviousLowFlowManagementLevel <- CurrentLowFlowManagementLevel
+  DateOfInterest <- as.Date(DateNumber)
+  
+  #Don't bother with Flushing flows outside of the November to March period
+  if (!lubridate::month(DateOfInterest) %in% c(11,12,1,2,3)) {DaysSinceLastOpuhaFlush <- 0; DaysSinceLastOpihiFlush <- 0}
+  
+  #print(DateOfInterest)
+  #if(DateOfInterest == "2014-09-10") browser()
+  #if(DateOfInterest == "2014-09-10") browser()
+  #browser()
+  #Find the day of the year
+  JulianDay <- as.numeric(format(DateOfInterest,"%j"))
+  
+  CurrentInflow <- coredata(InflowsTeAnaWaiRockwoodSnow[index(InflowsTeAnaWaiRockwoodSnow)== DateOfInterest,'Inflow'])
+  CurrentSnow   <- coredata(InflowsTeAnaWaiRockwoodSnow[index(InflowsTeAnaWaiRockwoodSnow)== DateOfInterest,'SnowStorage'])
+  
+  CurrentLakeArea <- LakeLevelToAreaAndVolume$`Area (Ha)`[which.min(abs(LakeLevelToAreaAndVolume$`Lake Level (masl)` - CurrentLakeLevel))] #Lookup the area
+  
+  #Save the storage and lake level to the timeseries
+  SyntheticLakeData[index(SyntheticLakeData) == DateNumber,'LakeStorage(m3)'] <- CurrentLakeStorage
+  SyntheticLakeData[index(SyntheticLakeData) == DateNumber,'LakeLevel(m)']    <- CurrentLakeLevel
+  
+  #Get the average lake level for the past X days, where X is specified by the low flow management regime. AMWG = 7, ORRP = 1, PC7 = 30
+  LakeLevelPastAverage <- mean(window(SyntheticLakeData$'LakeLevel(m)', 
+                                      start = as.Date(DateOfInterest)-ParameterAveraging[[LowFlowManagementType]]['LakeLevel'], 
+                                      end = DateOfInterest))
+  AveragedIndicators[index(AveragedIndicators) == DateNumber,'LakeLevelAve'] <- LakeLevelPastAverage
+  
+  #Get the average inflows for the last X days
+  LakeInflowsPastAverage <- mean(window(InflowsTeAnaWaiRockwoodSnow$Inflow, 
+                                        start = as.Date(DateOfInterest)-ParameterAveraging[[LowFlowManagementType]]['Inflows'], 
+                                        end = DateOfInterest))
+  AveragedIndicators[index(AveragedIndicators) == DateNumber,'InflowsAve'] <- LakeInflowsPastAverage
+  
+  #Get the average snow storage for the last X days 
+  SnowStoragePastAverage <- mean(window(InflowsTeAnaWaiRockwoodSnow$SnowStorage, 
+                                        start = as.Date(DateOfInterest)-ParameterAveraging[[LowFlowManagementType]]['Snow'], 
+                                        end = DateOfInterest))
+  AveragedIndicators[index(AveragedIndicators) == DateNumber,'SnowAve'] <- SnowStoragePastAverage
+  
+  #Get the estimated open water evaporation and allocation demand for the day
+  EvapAndDemand <- SeasonallyVaryingData[SeasonallyVaryingData$`Julian Day` == JulianDay,-1, drop = FALSE]
+  
+  if (GraphDisplay) {
+    #Update plots here
+    AveLinesIndices <- which(index(AveragedIndicators) %in% c(DateNumber-1,DateNumber))
+    ObsLinesIndices <- which(index(InflowsTeAnaWaiRockwoodSnow) %in% c(DateNumber-1,DateNumber))
+    LakeLinesIndices <- which(index(SyntheticLakeData) %in% c(DateNumber-1,DateNumber))
+    RestrictedIndices <- which(index(LimitedPeriod) %in% c(DateNumber-1,DateNumber))
+    
+    #Update irrigation demand plot
+    dev.set(which = 7)
+    
+    lines(LimitedPeriod$`Allocation demand between Te Ngawai and Saleyards Bridge`[RestrictedIndices],col="green" ,lty=1)           #Te Ana Wai to Saleyards Bridge
+    lines(LimitedPeriod$`Allocation below Saleyards`[RestrictedIndices],col="blue",lty=1)           #Below Saleyards Bridge
+    lines(LimitedPeriod$`Allocation Demand Between Dam and Saleyards`[RestrictedIndices],col="black",lty=1)           #Dam to Saleyards Bridge
+    
+    dev.set(which = 6)
+    #points(InflowsTeAnaWaiRockwoodSnow$Opihi.at.Rockwood[tail(ObsLinesIndices,1)],col="blue");             #Opihi at Rockwood
+    lines(InflowsTeAnaWaiRockwoodSnow$Opihi.at.Rockwood[ObsLinesIndices],col="blue") #Opihi at Rockwood
+    #points(InflowsTeAnaWaiRockwoodSnow$Te.Ana.Wai[tail(ObsLinesIndices,1)],col="black");                     #Te Ana Wai at Cave
+    lines(InflowsTeAnaWaiRockwoodSnow$Te.Ana.Wai[ObsLinesIndices],col="black")       #Te Ana Wai at Cave
+    
+    dev.set(which = 5)
+    #points(x=as.Date(DateOfInterest),LakeInflowsPastAverage,col="green");          #Averaged Inflows
+    lines(AveragedIndicators$InflowsAve[AveLinesIndices],col="green")         #Averaged Inflows
+    #points(x=as.Date(DateOfInterest),CurrentInflow,col="black");          #Inflows
+    lines(InflowsTeAnaWaiRockwoodSnow$Inflow[ObsLinesIndices],col="black")         #Inflows
+    
+    dev.set(which = 4)
+    #points(x=as.Date(DateOfInterest),SnowStoragePastAverage, col="green");    #Averaged Snow
+    lines(AveragedIndicators$SnowAve[AveLinesIndices],col="green")         #Averaged Snow
+    #points(x=as.Date(DateOfInterest),CurrentSnow, col="black");    #Snow
+    lines(InflowsTeAnaWaiRockwoodSnow$SnowStorage[ObsLinesIndices],col="black")         #Snow
+    
+    dev.set(which = 3)
+    #points(x=as.Date(DateOfInterest),LakeLevelPastAverage,col="green"); #Lake
+    lines(AveragedIndicators$LakeLevelAve[AveLinesIndices],col="green")         #Lake level
+    lines(SyntheticLakeData$`LakeLevel(m`[LakeLinesIndices],col="black")         #Lake level
+  }
+  #Update the progress bar
+  setTkProgressBar(pb,value = DateNumber - InitialDateNumber, label = paste0(format(as.Date(DateNumber),"%b %d %Y"),"\n Low flow management level: ",CurrentLowFlowManagementLevel,"\n Current abstraction restrictions: ",Restrictions))
+  
+  #Is this a day when the low flow management level is assessed?
+  AssessmentDay <- JulianDay %in% LakeInflowTriggers$`Julian Day` 
+  
+  #If it is, then get the thresholds and compare to the current values
+  if (AssessmentDay) {
+    #Get todays thresholds for lake levels
+    LakeLevelThresholds <- LakeLevelTriggers[LakeLevelTriggers$`Julian Day`==JulianDay,-1]
+    LakeThresholdCrossed <- max(0,which(LakeLevelThresholds > LakeLevelPastAverage ), na.rm=TRUE)
+    SyntheticSaleYardsBridgeFlow[index(SyntheticLakeData) == DateNumber,'LakeThresholdCrossed'] <- LakeThresholdCrossed
+    
+    #Get todays thresholds for lake inflows
+    InflowThresholds <- LakeInflowTriggers[LakeInflowTriggers$`Julian Day`==JulianDay,-1]
+    InflowThresholdCrossed <- max(0,which(InflowThresholds > LakeInflowsPastAverage ), na.rm=TRUE)
+    SyntheticSaleYardsBridgeFlow[index(SyntheticLakeData) == DateNumber,'InflowThresholdCrossed'] <- InflowThresholdCrossed
+    
+    #Get todays thresholds for snow storage
+    SnowThresholds <- SnowTriggers[SnowTriggers$`Julian Day`==JulianDay,-1]
+    SnowThresholdCrossed <- max(0,which(SnowThresholds > SnowStoragePastAverage ), na.rm=TRUE)
+    SyntheticSaleYardsBridgeFlow[index(SyntheticLakeData) == DateNumber,'SnowThresholdCrossed'] <- SnowThresholdCrossed
+    
+    #Find the appropriate regime level. 
+    
+    #Note also that there is also a requirement to test to get out of a regime
+    
+    SumOfThresholdsSquared <- LakeThresholdCrossed^2 + InflowThresholdCrossed^2 + SnowThresholdCrossed^2
+    SyntheticSaleYardsBridgeFlow[index(SyntheticLakeData) == DateNumber,'SumOfThresholdsSquared'] <- SumOfThresholdsSquared
+    
+    #For PC7 it requires two thresholds to be crossed
+    if (LowFlowManagementType %in% c("PC7Proposed2025","PC7Proposed2030","PC7Proposed2030withAMWGMinFlows","PC7Proposed2030withAMWGRestrictions","PC7Proposed2030withDailyThresholds","PC7Proposed2030variableLakeThreshold","PC7Proposed2030WithAMWGInflowThresholds")) {
+      if (SumOfThresholdsSquared >= 8) {
+        CurrentLowFlowManagementLevel <- 2
+      }else if (SumOfThresholdsSquared %in% c(2,3,5,6)) {
+        CurrentLowFlowManagementLevel <- 1 
+      } else {
+        CurrentLowFlowManagementLevel <- 0
+      } #end of PC7 regime check
+      
+
+    }else if (LowFlowManagementType == "Section42a") {  #This is just a 2 tier system
+      if (SumOfThresholdsSquared %in% c(2,3,5,6,8,9,12)) {
+        CurrentLowFlowManagementLevel <- 1
+      } else {
+        CurrentLowFlowManagementLevel <- 0
+      } #end of Section42a regime check
+    }else 
+      #AMWG also requires 2 thresholds to be crossed, but re-assessment happens in 14 days (set by the AMWGReassessmentDelay variable)
+      if (LowFlowManagementType %in% c("AMWG","AMWG201908_15Day","AMWGwithMonthlyThresholds","AMWGwithOC7MinFlows","AMWGwithPC7Restrictions","AMWG20190827_1Day2030")) {
+
+      if (DaysSinceLevelInitiated < AMWGReassessmentDelay) {
+        CurrentLowFlowManagementLevel <- PreviousLowFlowManagementLevel
+      } else {
+        DaysSinceLevelInitiated        <- 0 #reset the counter
+        if (SumOfThresholdsSquared >= 8) {
+          CurrentLowFlowManagementLevel <- 2
+        }else if (SumOfThresholdsSquared %in% c(2,3,5,6)) {
+          CurrentLowFlowManagementLevel <- 1 
+        } else {
+          CurrentLowFlowManagementLevel <- 0
+        } 
+        
+        #browser()
+        #For AMWG come out of a regime only if the lake level is OK
+        if (CurrentLowFlowManagementLevel < PreviousLowFlowManagementLevel & LakeThresholdCrossed < PreviousLowFlowManagementLevel) {
+          #browser()
+          CurrentLowFlowManagementLevel <- max(CurrentLowFlowManagementLevel,LakeThresholdCrossed)
+        } else if (CurrentLowFlowManagementLevel < PreviousLowFlowManagementLevel) {
+          CurrentLowFlowManagementLevel <- PreviousLowFlowManagementLevel   #don't come out unless lake level is OK
+        }
+        
+        #Check if the regime change should be manually approved, if it should match the AMWG workshop approvals, or if it should automatically switch
+        if (RegimeChangeType == "Userselect") {
+          #Check, via user input, whether the regime level should be lower than assessed
+          if (CurrentLowFlowManagementLevel > 0 ) {
+            if (PreviousLowFlowManagementLevel == 0) preselectText <- "No Regime" else preselectText <- paste("Level",PreviousLowFlowManagementLevel)
+            #***********************************
+            #Change the message based on the current level
+            #Only enable options below and equal to the crossed threshold
+            #browser()
+            TitleMessage <- paste0("Threshold to level ",CurrentLowFlowManagementLevel," crossed.\n Select desired management level")
+            AllChoices <- c("No regime","Level 1","Level 2")
+            ChoicesVector <- AllChoices[1:(CurrentLowFlowManagementLevel+1)]
+            #user.input <- select.list(title = TitleMessage, choices=ChoicesVector,graphics=TRUE,preselect = preselectText,multiple = FALSE)
+            user.input <- tk_select.list(title = TitleMessage, choices=ChoicesVector,preselect = preselectText,multiple = FALSE)
+            #************************************
+            
+            CurrentLowFlowManagementLevel <- which(AllChoices == user.input) - 1
+          }
+        } else if (RegimeChangeType == "AMWGWorkshop"){
+          #Set the management level based on the AMWG workshop results
+          #This will require consideration of date and management level to get right, as running over differnt number of years has subtle differences in the dates of regime threshold crossing dates.
+        }
+      } #end of AMWG regime check
+  } #end of Low flow management typeif statement
+  
+  #Update counter of the number of days since a restrictive regime was implemented
+  DaysSinceLevelInitiated <- DaysSinceLevelInitiated + 1
+  
+} #End if assessment day
+
+RegimeLevel[index(RegimeLevel) == DateNumber] <- CurrentLowFlowManagementLevel
+#DaysSinceLevelInitiated <- DaysSinceLevelInitiated + 1 #end of Assessment day assessments
+
+#Determine the minimum flow requirements associated with the low flow management regime
+SaleyardsBridgeMinFlow <- SeasonallyVaryingMinimumFlowData[SeasonallyVaryingMinimumFlowData$`Julian Day`== JulianDay,CurrentLowFlowManagementLevel+2]
+NonRestrictedMinFlow <- SeasonallyVaryingMinimumFlowData[SeasonallyVaryingMinimumFlowData$`Julian Day`== JulianDay,2]
+
+#Determine the allocation restrictions associated with the low flow management regime.
+#This is a bit tricky as it requires regime level, lake level, and julian date
+#Find the restrictions by selecting the regime level currently in, the lake level that is greater than but closest to the current lake level and the Julian Day is less than but nearest to the current Julian Day
+RestrictionsByRegimeLevel <- SeasonallyVaryingRestrictions[(SeasonallyVaryingRestrictions$Level == CurrentLowFlowManagementLevel),]
+
+RestrictionsByRegimeAndLakeLevel <- RestrictionsByRegimeLevel[(RestrictionsByRegimeLevel$'Lake Level' - CurrentLakeLevel == minpositive(RestrictionsByRegimeLevel$'Lake Level' - CurrentLakeLevel)),]
+
+Restrictions <-  RestrictionsByRegimeAndLakeLevel[(JulianDay - RestrictionsByRegimeAndLakeLevel$'Julian Day' == minpositive(JulianDay - RestrictionsByRegimeAndLakeLevel$'Julian Day')),'Restrictions (%)']
+
+SyntheticSaleYardsBridgeFlow$Restrictions[index(SyntheticSaleYardsBridgeFlow)==DateOfInterest] <- Restrictions
+
+#Apply the restrictions to the demand
+Demand              <- EvapAndDemand[-1] * (100 - Restrictions) / 100
+NonRestrictedDemand <- EvapAndDemand[-1]
+
+#Get today's inflows, and tributary flows
+Inflow <- InflowsTeAnaWaiRockwoodSnow$Inflow[index(InflowsTeAnaWaiRockwoodSnow) == DateOfInterest]
+RockwoodFlow <- InflowsTeAnaWaiRockwoodSnow$Opihi.at.Rockwood[index(InflowsTeAnaWaiRockwoodSnow) == DateOfInterest]
+TeAnaWaiFlow <- InflowsTeAnaWaiRockwoodSnow$Te.Ana.Wai[index(InflowsTeAnaWaiRockwoodSnow) == DateOfInterest]
+
+#What is the minimum flow required at Saleyards Bridge, colloquially known as the "Greenline".
+Greenline <- SaleyardsBridgeMinFlow + Demand$`Allocation below Saleyards`
+
+#Figure out what needs to be released based on demand and whether the dam exists
+RequiredDamRelease <- if (!DamExists) {
+  Inflow 
+} else if (CurrentLakeLevel > 370) {
+  max(MinimumDamRelease,Greenline + SaleyardsBridgeBuffer - TeAnaWaiFlow - RockwoodFlow + 
+        Demand$`Allocation Demand Between Dam and Saleyards` +
+        Demand$`Allocation demand between Te Ngawai and Saleyards Bridge`)
+} else {min(Inflow,max(MinimumDamRelease,Greenline + SaleyardsBridgeBuffer - TeAnaWaiFlow - RockwoodFlow ))
+}
+
+#Figure out whether a flushing flow is required because of need in the Opuha
+VolumeToFlush<-0
+ if (FlushFlows & (DaysSinceLastOpuhaFlush > OpuhaFlushGapDays)) {VolumeToFlush <- OpuhaFlushSize; DaysSinceLastOpuhaFlush <- 0} 
+
+
+#Check if the Opihi needs a flush and update the required flow if it does and its bigger than the Opuha flush flow
+ if (FlushFlows & (DaysSinceLastOpihiFlush > OpihiFlushGapDays)) {VolumeToFlush <- max(OpihiFlushSize,VolumeToFlush); DaysSinceLastOpihiFlush<- 0} 
+RequiredDamRelease <- RequiredDamRelease + VolumeToFlush / 24 / 60 / 60
+
+#browser()
+LakeEvaporation        <- EvapAndDemand$`Evap(mm)` / 1000 * CurrentLakeArea * 100 * 100
+LakeEvaporationAsARate <- LakeEvaporation / 24 / 60/ 60
+
+
+
+#Figure out what will actually be released. If the storage is below the operational intent then storage will be attempted to be lifted, if it is above the operational intent, then additional water will be released, otherwise just the required release will be released
+OperationalIntentToday <- LakeStorageOperatingIntentData[LakeStorageOperatingIntentData$`Julian Day`==JulianDay,c('Lower Intent','Upper Intent')]
+UpperIntentToday   <- OperationalIntentToday$'Upper Intent' * MaximumCapacity
+LowerIntentToday   <- OperationalIntentToday$'Lower Intent' * MaximumCapacity
+AverageIntentToday <- mean(UpperIntentToday,LowerIntentToday)
+
+if (CurrentLakeStorage <= AverageIntentToday) {
+  #If possible, store some water, but only to bring the lake storage up to the middle of today's operational intent
+  Outflows <- max((Inflow - LakeEvaporationAsARate - (AverageIntentToday - CurrentLakeStorage) / 24 / 60 / 60),RequiredDamRelease )
+  #Outflows <- max((Inflow - (AverageIntentToday - CurrentLakeStorage) / 24 / 60 / 60),RequiredDamRelease)
+} else {
+  #release the required release plus whatever extra is required to lower the lake storage to the middle of today's operational intent
+  Outflows <- max((CurrentLakeStorage - AverageIntentToday) / 24 /60 / 60,RequiredDamRelease)
+} 
+
+SyntheticSaleYardsBridgeFlow$Estimated[index(SyntheticSaleYardsBridgeFlow) == DateNumber] <- Outflows + 
+  RockwoodFlow + 
+  TeAnaWaiFlow - 
+  Demand$`Allocation Demand Between Dam and Saleyards` +
+  Demand$`Allocation demand between Te Ngawai and Saleyards Bridge`
+
+#Check if a flush sized flow out of the dam has ocurred and reset the Opuha flush gap day counter if it has
+if (Outflows  > OpuhaFlushFlowRate) DaysSinceLastOpuhaFlush <- 0
+
+#if (lubridate::month(DateOfInterest) == 11) browser()
+#Check if a flush flow at SYB has ocurred and reset the Opihi flush gap day counter if it has
+if (SyntheticSaleYardsBridgeFlow$Estimated[index(SyntheticSaleYardsBridgeFlow) == DateNumber] > OpihiFlushFlowRate) DaysSinceLastOpihiFlush <- 0
+
+SyntheticSaleYardsBridgeFlow$BelowBridgeDemand[index(SyntheticSaleYardsBridgeFlow) == DateNumber] <- Demand$`Allocation below Saleyards`
+
+SyntheticSaleYardsBridgeFlow$MainStemDemand[index(SyntheticSaleYardsBridgeFlow) == DateNumber] <- Demand$`Allocation Demand Between Dam and Saleyards`
+
+SyntheticSaleYardsBridgeFlow$NonRestrictedDemand[index(SyntheticSaleYardsBridgeFlow) == DateNumber] <- sum(NonRestrictedDemand[c('Allocation Demand Between Dam and Saleyards','Allocation below Saleyards')])
+
+SyntheticSaleYardsBridgeFlow$MinimumFlow[index(SyntheticSaleYardsBridgeFlow) == DateNumber]  <- SaleyardsBridgeMinFlow
+SyntheticSaleYardsBridgeFlow$NonRestrictedMinimumFlow[index(SyntheticSaleYardsBridgeFlow) == DateNumber]  <- NonRestrictedMinFlow
+if (GraphDisplay) {
+  dev.set(which = 2)
+  #points(x=as.Date(DateOfInterest),SyntheticSaleYardsBridgeFlow$Estimated[index(SyntheticSaleYardsBridgeFlow) == DateNumber],col="green"); #Saleyards
+  lines(SyntheticSaleYardsBridgeFlow$Estimated[AveLinesIndices],col="green")         #Saleyards Bridge Flows
+}
+CurrentLakeStorage <- max(0,CurrentLakeStorage+(Inflow - Outflows) * 24 * 60 * 60 - LakeEvaporation)
+#Special case where Lake Storage is set to a specific value on a specific date
+#if (JulianDay == 306) {CurrentLakeStorage <- max(65522824,CurrentLakeStorage)}
+
+#Lookup the lake level from the storage ready for the next day's loop
+CurrentLakeLevel <- LakeLevelToAreaAndVolume$`Lake Level (masl)`[which.min(abs(LakeLevelToAreaAndVolume$`Available Volume (m3)` - CurrentLakeStorage))]
+
+  #Increment counter of days since the last flush
+  DaysSinceLastOpuhaFlush      <- DaysSinceLastOpuhaFlush + 1
+  DaysSinceLastOpihiFlush      <- DaysSinceLastOpihiFlush + 1
+} #end of daily for loop
+
+if (GraphDisplay) {
+  tkmessageBox(title="That is all folks",message="all done",type="ok")
+  #dlg_message(message="All Done?", type = "ok")$res
+  
+  graphics.off()
+  close(pb)
+}
+RegimeStatsOutput     <- RegimeStats()
+IrrigationStatsOutput <- IrrigationStats()
+AllOutput <- cbind('TimeStamp'=CurrentRunTimeStamp,RegimeStatsOutput,IrrigationStatsOutput) %>%
+  mutate_if(is.numeric, round, digits = 2)
+
+#Append the output to a file with the years run and the exact date-time stamp in the filename
+#ScenarioOutputOnYYYYMMDD-HH-MM.csv
+OutputFileName <- file.path(DataDirectory,"ScenarioRuns.csv")
+ColNamesOrNot <- !file.exists(OutputFileName)
+write.table(AllOutput, file = OutputFileName, sep=",", append = TRUE,row.names = FALSE, col.names = ColNamesOrNot )
+
+#If we want we can save all the data to a file too
+write.zoo(merge(SyntheticSaleYardsBridgeFlow,SyntheticLakeData), file = file.path(DataDirectory,"Output.csv"), sep=",")
+
+```
+ 
+I need a measure of the frequency of threshold crossings. Note that this is reliant on the regime exiting strategy as well.
+Find the number of years for which the thresholds are crossed, and for how many days.
+The Orari, Temuka, Opihi, Pareora Zone Committee did not want the low flow regimes to occur too often. To help with assessing that, the fraction of years which had each regime ocurring is presented here.
+
+# I need a measure of low flow reliability 
+# - compared to current low flow regime, 
+# - compared to the proposed low-flow regime.
+# The metrics include:
+# - frequency of time when the minimum flow is not met by the "Saleyards Bridge flow less downstream demand"
+# - the longest length of time that minimum flows are not met, and when that ocurred
+# - the longest length of time at minimum flows, and when that ocurred
+# 
+```{r}
+RegimeStats <- RegimeStats()
+```
+# 
+# We are also interested in how often there is enough water available for the irrigation demand.
+# This is measured as the amount of water provided compared to the demand
+# The amount of time full allocation is available
+# The amount of water sacrificed during regimes
+```{r}
+
+IrrigationStatsOutput <- IrrigationStats()
+
+print(paste("Fraction of years with more than 95 % abstraction availability", round(IrrigationStatsOutput$PercentOfYearsWithMoreThan95pctAvailability,2)))
+
+print(paste("Seasonally adjusted irrigation demand volume is limited to", round(IrrigationStatsOutput$VolumetricAvailability* 100,1),"% under this scenario"))
+ 
+print(paste("During the irrigation season full water demand is available", round(IrrigationStatsOutput$AvailabilityFrequency* 100,1),"% of the time under this scenario"))
+ 
+print(paste("During the irrigation season some water demand is available", round(IrrigationStatsOutput$NonFullRestrictionFrequency* 100,1),"% of the time under this scenario"))
+
+print(paste0(round(IrrigationStatsOutput$AllocationSacrificedDuringLowFlowRegimes/1000000,0)," Mm3 (",round(IrrigationStatsOutput$AllocationSacrificedDuringLowFlowRegimesPercent,1),"%) of water lost from irrigation as a result of the low flow management regimes"))
+ 
+print(paste0(round(IrrigationStatsOutput$RiverWaterSacrificedDuringLowFlowRegimes/1000000,0)," Mm3 (",round(IrrigationStatsOutput$RiverWaterSacrificedDuringLowFlowRegimesPercent,1),"% of irrigation-season minimum flows) of water lost by the river as a result of the low flow management regimes"))
+```
+An availability timeseries is needed
+```{r}
+#The following function writes an output file with monthly availability timeseries in it
+AvailabilitySeries()
+```
+
+
+
+# 
+# I want a monthly distribution of threshold crossing. So a table of how frequent the thresholds are crossed in each month.
+I also want to save a copy of the restrictions timeseries for use elsewhere
+```{r}
+  LevelTimeSeries <- RegimeLevel
+  
+  LevelTimeSeries[1] <- 0
+  LevelTimeSeries <- na.approx(RegimeLevel,method='constant',f=0)
+  
+  #Create a factor version of the RegimeLevel timeseries
+  RegimeLevelFactors <- zoo(factor(LevelTimeSeries, labels = c("No Regime","Level 1","Level 2")),order.by=index(LevelTimeSeries))
+  
+  MonthlyTotals <- aggregate(RegimeLevelFactors, by= as.numeric(format(index(RegimeLevelFactors),"%Y%m")), table)
+  MonthlyTotals$Months <- as.numeric(substring(index(MonthlyTotals),5,7))
+  
+  CountOcurrence <- function(x) { sum(x>0)}
+  
+  Level1Ocurrences <- aggregate(coredata(MonthlyTotals)[,"Level 1"], by=list(MonthlyTotals$Months), FUN= CountOcurrence   )
+  Level2Ocurrences <- aggregate(coredata(MonthlyTotals)[,"Level 2"], by=list(MonthlyTotals$Months), FUN= CountOcurrence   )
+
+  print("level 1 occurences:")
+  print(t(Level1Ocurrences))
+  print("level 2 Ocurences:")
+  print(t(Level2Ocurrences))
+
+SyntheticSaleYardsBridgeFlow$RestrictionLevel <- LevelTimeSeries  
+  write.table(file=file.path(DataDirectory,paste0("SyntheticLake_",LowFlowManagementType,".csv")), SyntheticLakeData,sep=",",row.names = index(SyntheticLakeData))
+    write.table(file=file.path(DataDirectory,paste0("SyntheticSaleYardsBridgeFlow_",LowFlowManagementType,".csv")), SyntheticSaleYardsBridgeFlow,sep=",",row.names = index(SyntheticSaleYardsBridgeFlow))
+```
+# 
+# 
+# Include option for different mainstem minimum flow during a level 2 (down to 1 m3/s)
+# 
+# Include winter demand requirements
+# 
+# Optimise thresholds, given different minimum flows
+# 
+# I want to know length of time at minimum flow
+# 
+# Test impact of naturalised vs observed
+# 
+# Test impact of demand vs consented
+# 
+# 
+# Test scenarios: ORRP limits, PC7 limits, 2030 limits, AMWG, AMWGV2
+# 
+# 
+# Think about how the information should be provided, presented.
+# Table of metrics for different scenarios, colour coded
+# Graph of 2014-16 case with each scenario included
+# 
+# Generate monthly stats, see Paul Mosley Report from Hurunui
+# 
+# Prepare a report, get it reviewed, and get copies to TDC, DOC, F&G, Ngai Tahu
+# 
+# Undertake availaility assessments for the tributaries
