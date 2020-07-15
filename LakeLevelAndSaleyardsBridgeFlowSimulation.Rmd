@@ -9,7 +9,7 @@ Low flow management scenarios are prescribed according to different minimum flow
 
 Set some user variables.
 ```{r}
-LowFlowManagementType <- "AMWG"   #options currently: "PC7Proposed2025", "PC7Proposed2030", "PC7Proposed2030WithAMWGInflowThresholds", "PC7Proposed2030variableLakeThreshold", "PC7Proposed2030withAMWGMinFlows", "PC7Proposed2030withAMWGRestrictions", "Section42a". "AMWG","AMWGwithPC7Restrictions","AMWGwithPC7MinFlows","AMWGwithMonthlyThresholds".
+LowFlowManagementType <- "AMWGwithPC7Restrictions"   #options currently: "PC7Proposed2025", "PC7Proposed2030", "PC7Proposed2030WithAMWGInflowThresholds", "PC7Proposed2030variableLakeThreshold", "PC7Proposed2030withAMWGMinFlows", "PC7Proposed2030withAMWGRestrictions", "Section42a". "AMWG","AMWGwithPC7Restrictions","AMWGwithPC7MinFlows","AMWGwithMonthlyThresholds".
 #"AMWG" has the minimum flows and thresholds that match the AMWG submission on PC7.
 #Each of these options refers to a folder in the "DataDirectory". The folder must contain 6 files that describe the inflo triggers, the lake level triggers, the Minimum flow requirements, the water abstraction restrictions, the snow storage thresholds. Some also specify the timeseries of inflows, tributary flows and snow storage.
 #Each of the files have specific format requirements that, until documentation is complete, need to be discerned from the examples and the code.
